@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import traceback
 from pathlib import Path
@@ -223,12 +222,30 @@ def dispatch(request: dict) -> dict:
     return handler(request.get("params") or {})
 
 
+def _force_utf8_streams() -> None:
+    """把 stdio 切成 UTF-8。
+
+    **这是传输层的正确性问题，不是显示问题。** Windows 上 Python 的 stdout
+    默认跟随本地代码页（本机 cp936/GBK），而协议那头按 UTF-8 解码 ——
+    实测：写出的 `未知方法：bogus` 在 UTF-8 侧读出乱码，daemon 解析响应直接失败。
+
+    `_dump_line` 已经保证了 `ensure_ascii=False`（中文不被转义成 \\uXXXX），
+    但那只决定**字符如何序列化**，编码由这个流决定。两件事都要对。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
+
+
 def _dump_line(message: dict) -> str:
     return json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n"
 
 
 def serve_stdio() -> int:
     """stdio 传输。daemon 也可以用管道接它，换传输不换格式（架构 §1.4）。"""
+    _force_utf8_streams()
     for raw in sys.stdin:
         raw = raw.strip()
         if not raw:
@@ -263,11 +280,22 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _selftest() -> int:
-    """不依赖 torch 的自检：验证 markdown 渲染与契约校验这两块纯逻辑。"""
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    """不依赖 torch 的自检：markdown 渲染、契约校验，以及 **JSON-RPC 传输层**。
+
+    transport 那一段**必须起子进程**测。同进程调用 `dispatch()` 永远不会暴露编码问题 ——
+    缺陷恰恰在「把字符串写进 stdout」这一步，而测试进程的 stdout 编码与被测进程的
+    可能不同。本轮真实踩到过：worker 用 GBK 写中文，daemon 按 UTF-8 读，响应直接损坏。
+
+    也**不得**在这里给子进程预设 `PYTHONIOENCODING=utf-8`。那等于给被测对象戴上安全帽，
+    把这个自检要抓的缺陷正好遮住（实测：加了那一行之后，撤掉修复自检依然全绿）。
+    子进程必须在「没有任何环境兜底」的条件下跑。
+    """
+    _force_utf8_streams()
+
     sample = {"elements": [
         {"type": "icon", "bbox": [10, 20, 30, 40], "interactivity": True, "content": "设置"},
-        {"type": "text", "bbox": [50, 60, 150, 80], "interactivity": False, "content": "标题|含竖线\n含换行"},
+        {"type": "text", "bbox": [50, 60, 150, 80], "interactivity": False,
+         "content": "标题|含竖线\n含换行"},
     ]}
     text = to_markdown(sample, source="shot.png", model="example-vlm")
     assert "| # | type | bbox | interactivity | content |" in text, text
@@ -275,7 +303,7 @@ def _selftest() -> int:
     assert "\\|" in text, "竖线必须被转义，否则表格结构被破坏"
     assert "\n含换行" not in text, "换行必须被消掉"
 
-    # 契约校验：新增元素必须被拒
+    # ---- 契约校验（DEC-011）----
     try:
         validate_optimized(sample, {"elements": sample["elements"] + [
             {"type": "icon", "bbox": [1, 1, 2, 2], "content": "凭空造的"}]})
@@ -284,7 +312,6 @@ def _selftest() -> int:
     else:
         raise AssertionError("新增元素未被契约拦下")
 
-    # 契约校验：不动 bbox 的优化必须通过
     optimized = {"elements": [
         {"bbox": [50, 60, 150, 80], "content": "标题"},
         {"bbox": [10, 20, 30, 40], "content": "偏好设置"},
@@ -294,8 +321,59 @@ def _selftest() -> int:
     assert merged["elements"][0]["content"] == "偏好设置"
     assert merged["elements"][0]["bbox"] == [10, 20, 30, 40], "bbox 必须保留检测器的值"
 
-    print("cu-omni 自检通过：markdown 渲染 + 契约校验")
+    _selftest_transport()
+
+    print("cu-omni 自检通过：markdown 渲染 + 契约校验 + JSON-RPC 传输层")
     return 0
+
+
+def _selftest_transport() -> None:
+    """起一个真实的 worker 子进程，走一遍 stdio 协议。
+
+    测三件事，每一件都是「只在真实进程边界上才会错」的：
+      1. 响应能按 UTF-8 解出来（编码）；
+      2. 中文原样可读，不是被转义成 \\uXXXX，也不是乱码；
+      3. 错误响应带封闭错误码，且**不泄露栈**。
+    """
+    import os
+    import subprocess
+
+    requests = "".join(_dump_line(message) for message in [
+        {"jsonrpc": "2.0", "id": 1, "method": "system.ping", "params": {}},
+        {"jsonrpc": "2.0", "id": 2, "method": "no.such.method", "params": {}},
+    ])
+    # 显式摘掉环境里的编码兜底：子进程必须在「裸」条件下跑，
+    # 这样它只能靠自己切换 stdout 编码，而这正是被测的行为。
+    env = {key: value for key, value in os.environ.items()
+           if key.upper() not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+    proc = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "--stdio"],
+        input=requests.encode("utf-8"), capture_output=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, f"worker 退出码 {proc.returncode}"
+
+    # 关键：不解码就交给 json.loads 会掩盖编码错误，所以显式按 UTF-8 解。
+    try:
+        lines = proc.stdout.decode("utf-8").strip().splitlines()
+    except UnicodeDecodeError as exc:
+        raise AssertionError(
+            f"worker 的 stdout 不是 UTF-8：{exc}。"
+            "协议那头按 UTF-8 解码，这会让响应直接损坏。"
+        ) from exc
+    assert len(lines) == 2, f"应当有两个响应，实际 {len(lines)} 个：{lines}"
+
+    first = json.loads(lines[0])
+    assert first["id"] == 1 and first.get("result") == {"ok": True}, first
+
+    second = json.loads(lines[1])
+    error = second.get("error")
+    assert error is not None, second
+    data = error["data"]
+    assert data["code"] == OMNI_FAILED, data
+    # 中文必须原样可读：既是编码正确，也验证了 ensure_ascii=False 没有被改回去。
+    assert "未知方法" in error["message"], error["message"]
+    assert "\\u" not in error["message"], "中文被转义了，`ensure_ascii=False` 被改回去了"
+    assert "Traceback" not in json.dumps(second), "错误响应里不得出现栈"
 
 
 if __name__ == "__main__":
