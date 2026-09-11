@@ -1,0 +1,8 @@
+project-memory/
+.venv/
+spike/out/
+# 临时调研资料与设计期截图，带时间戳、会持续增长，不进仓库
+tmp-doc/
+__pycache__/
+*.pyc
+.pytest_cache/
