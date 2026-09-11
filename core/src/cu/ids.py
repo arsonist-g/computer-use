@@ -21,6 +21,29 @@ TITLE_SLUG_MAX = 40
 _ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 _ID_SUFFIX_LEN = 4
 
+#: 取文件名时把标题折叠成 ASCII。
+#:
+#: **这不是审美选择，是绕开上游库的缺陷。** 实测（2026-09-12）：
+#: `windows-capture` 的 `save_as_image(path)` 把路径按本地代码页往返一次，
+#: 标题里的 `·`(U+00B7) 会被写成 `路`(U+8DEF) —— 正是 UTF-8 字节 `C2 B7`
+#: 被当作 GBK 解释的结果。后果不是「名字难看」，而是**文件写到了另一个路径上**，
+#: 我们再 stat 原路径永远为空，截图功能整体失效。
+#:
+#: 对照实验：Python 自己用同一个名字写文件完全正常，只有经过该库才被改写，
+#: 所以这是上游的缺陷而不是本机文件系统的问题，内核层面无法绕开。
+#: 契约 DEC-012 说 title_slug「不翻译」—— 那条仍然成立：窗口标题原样保留在
+#: `session.json` 的 `window.title` 里（复盘读的是那里），只是**文件名**用 ASCII。
+_SLUG_TRANSLITERATE = {
+    ord("·"): "-", ord("•"): "-", ord("–"): "-", ord("—"): "-", ord("−"): "-",
+    ord("“"): "", ord("”"): "", ord("‘"): "", ord("’"): "", ord("«"): "", ord("»"): "",
+    ord("…"): "...", ord("×"): "x", ord("÷"): "-", ord("°"): "deg",
+    ord("©"): "(c)", ord("®"): "(r)", ord("™"): "(tm)", ord("€"): "EUR",
+    ord("£"): "GBP", ord("¥"): "CNY", ord("→"): "-", ord("←"): "-",
+    ord("≤"): "<=", ord("≥"): ">=", ord("≠"): "!=",
+}
+#: 折叠后可能连续出现多个分隔符，压成一个。
+_SLUG_COLLAPSE = re.compile(r"[-_]{2,}")
+
 
 def now_iso(moment: datetime | None = None) -> str:
     """ISO-8601 带本地时区偏移、毫秒精度（data-model.md §3.6）。
@@ -40,11 +63,21 @@ def new_session_id(moment: datetime | None = None) -> str:
 
 
 def slug_title(title: str) -> str:
-    """窗口标题 → 文件名片段。**不翻译**（DEC-012）：标题是运行时字符串，无法可靠英文化。"""
+    """窗口标题 → 文件名片段。**始终是纯 ASCII**（理由见 `_SLUG_TRANSLITERATE` 上方）。
+
+    规则来自 DEC-012：替换 `\\/:*?"<>|` 与控制字符 → 折叠连续空白 → 截断 40 字符
+    → 空则 `untitled`。在此之上多一步「非 ASCII 字符折叠为 `_`」，把标题里的中文、
+    全角符号、emoji 一律折叠 —— 它们原样保留在 `session.json` 的 `window.title` 里。
+    """
     cleaned = _ILLEGAL_IN_FILENAME.sub("", title or "")
+    cleaned = cleaned.translate(_SLUG_TRANSLITERATE)
+    # 非 ASCII 一律折叠，而不是丢弃 —— 丢弃会把「未命名 - 记事本」压成「-」，
+    # 折叠成下划线还能看出「这里原本有内容」。
+    cleaned = "".join(ch if ch.isascii() and ch.isprintable() else "_" for ch in cleaned)
     cleaned = _WHITESPACE.sub(" ", cleaned).strip()
+    cleaned = _SLUG_COLLAPSE.sub("-", cleaned).strip("-_ ")
     if len(cleaned) > TITLE_SLUG_MAX:
-        cleaned = cleaned[:TITLE_SLUG_MAX].strip()
+        cleaned = cleaned[:TITLE_SLUG_MAX].strip("-_ ")
     return cleaned or "untitled"
 
 
@@ -79,6 +112,38 @@ def random_token(length: int = 8) -> str:
     return secrets.token_hex(length // 2)
 
 
+#: 结构化数据文件名里的后缀分隔符。**下划线，不是连字符**。
+#: data-model.md §3.2 的模式行把它写成 `[-omni]`，但 §3.1 / §3.3 / DEC-012 里
+#: 三处**真实文件名**一律是下划线（`win-0x0001A2B-未命名-记事本_omni-100x200-0004.md`
+#: / `img-photo-0007_omni.md`），DEC-025 的 `--image` 形态也依赖 `_omni.md` 结尾。
+#: 示例优先于模式行 —— 模式行的方括号是「可选」的标记法，不是字面量。
+#: 这条冲突已记入 DEC-043。
+PARSED_SUFFIX_SEPARATOR = "_"
+
+#: 结构化数据后缀的拼写。`omni` 与 `omni_ai` 是两种工件（DEC-011）：
+#: 同一张图可以解析两次，且必须落在不同文件里，否则后写的覆盖前一个。
+PARSED_SUFFIXES = frozenset({"omni", "omni_ai"})
+
+
+def is_parsed_name(name: str) -> bool:
+    """文件名是否是「由图片解析出的结构化数据」。
+
+    这是 `_omni.md` / `_omni_ai.md` 的**唯一**判定入口。配额清理（DEC-017 阶段 1）
+    靠它决定「哪些 md 可以随来源图片一起删」—— 判定错了两边都糟：
+    判定过宽会删掉操作日志，过窄会让结构化数据只能等到阶段 2 才消失。
+    """
+    if not name.endswith(".md") or name in ("ops.md", "session.json"):
+        return False
+    stem = name[:-3]
+    for suffix in PARSED_SUFFIXES:
+        if stem.endswith(f"{PARSED_SUFFIX_SEPARATOR}{suffix}"):
+            return True
+        # 带坐标的形态里后缀后面还有 `-{x}x{y}-{seq}` 结尾。
+        if f"{PARSED_SUFFIX_SEPARATOR}{suffix}-" in stem:
+            return True
+    return False
+
+
 def artifact_name(
     kind: str,
     seq: int,
@@ -91,16 +156,25 @@ def artifact_name(
 ) -> str:
     """`{kind}-{hwnd}-{title_slug}[-{suffix}]-{x}x{y}-{seq:04d}.{ext}`。
 
-    `suffix` 是结构化数据的 `omni` / `omni_ai`（data-model.md §3.2）。
-    外部图片（`kind="img"`）没有 hwnd 与坐标，走短模式 —— 硬套 `{x}x{y}`
-    只能编造无意义的占位值。
+    `suffix` 是结构化数据的 `omni` / `omni_ai`（data-model.md §3.2 / DEC-011）。
+
+    **两种不同的落点，取决于有没有坐标**（§3.2 末尾：「seq 在扩展名之前」）：
+
+      - 有坐标（窗口 / 全屏）：`win-…-{title}[-{suffix}]-{x}x{y}-{seq:04d}.{ext}`
+      - 无坐标（`img` 外部图片）：`img-{title}_{suffix}-{seq:04d}.{ext}`
+
+    外部图片没有 hwnd 与坐标，硬套 `{x}x{y}` 只能编造无意义的占位值，
+    所以走更短的模式 —— 但它仍带零填充序号，同一会话内的字典序依然等于时间序。
     """
     parts = [kind]
     if hwnd is not None:
         parts.append(hwnd)
     if title is not None:
         parts.append(slug_title(title))
-    if suffix:
+    if suffix and origin is None:
+        # 无坐标：后缀用下划线贴在标题后面，再跟零填充序号。
+        parts[-1] = f"{parts[-1]}{PARSED_SUFFIX_SEPARATOR}{suffix}"
+    elif suffix:
         parts.append(suffix)
     if origin is not None:
         parts.append(f"{origin[0]}x{origin[1]}")

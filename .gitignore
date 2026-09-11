@@ -3,6 +3,8 @@ project-memory/
 spike/out/
 # 临时调研资料与设计期截图，带时间戳、会持续增长，不进仓库
 tmp-doc/
+# 真机测试产出的截图，每次跑都会重新生成
+core/tests/native/out/
 __pycache__/
 *.pyc
 .pytest_cache/

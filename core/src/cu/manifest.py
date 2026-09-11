@@ -268,9 +268,12 @@ class SessionManifest:
         if not isinstance(raw, dict):
             return cls()
         status = raw.get("status")
-        if status not in SESSION_STATUSES:
-            # 非法值一律按 orphaned 处理（data-model.md §3.6）—— 看不懂的状态
-            # 意味着这个会话的记录不可信，宁可让 AI 重建会话。
+        # `status` 来自可被手改的 JSON，可能是 list/dict（不可哈希）——
+        # 用 tuple 做成员测试而不是 `in frozenset`，否则这里抛 TypeError，
+        # 整个会话就打不开了，与「清单读不坏会话」的设计相反。
+        # 非法值一律按 orphaned 处理（data-model.md §3.6）：看不懂的状态意味着
+        # 这个会话的记录不可信，宁可让 AI 重建会话。
+        if not (isinstance(status, str) and status in SESSION_STATUSES):
             status = SESSION_ORPHANED
         manifest = cls(
             session_id=str(raw.get("session_id", "") or ""),
