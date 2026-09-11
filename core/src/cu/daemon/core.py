@@ -53,6 +53,8 @@ class DaemonStatus:
     version: str
     overlay_state: str
     input_blocked: bool
+    omni_ready: bool = False
+    omni_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +63,7 @@ class DaemonStatus:
             "idle_for_s": round(self.idle_for_s, 1), "resident_bytes": self.resident_bytes,
             "protocol_version": self.protocol_version, "version": self.version,
             "overlay_state": self.overlay_state, "input_blocked": self.input_blocked,
+            "omni_ready": self.omni_ready, "omni_reason": self.omni_reason,
         }
 
 
@@ -417,6 +420,11 @@ class Daemon:
     # ---- daemon ----
 
     def _daemon_status(self, _params: dict) -> dict:
+        # omni 就绪状态只做**廉价的文件检查**，不拉起子进程 —— `status` 是诊断命令，
+        # 不该为了报一个布尔值付几十秒的模型加载代价。真要验能不能跑，用 `parse`。
+        from ..desktop import omni as omni_bridge
+
+        omni_ready, omni_reason = omni_bridge.available()
         return DaemonStatus(
             pid=os_getpid(),
             started_at=self.started_at,
@@ -429,6 +437,8 @@ class Daemon:
             version=__version__,
             overlay_state=self.controller.state,
             input_blocked=self.controller.blocker.blocking,
+            omni_ready=omni_ready,
+            omni_reason=omni_reason,
         ).to_dict()
 
     def _daemon_stop(self, _params: dict) -> dict:

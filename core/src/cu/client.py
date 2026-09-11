@@ -348,7 +348,7 @@ def render_text(command: str, result: Any, verbose: bool = False) -> str:
             f"{key}: {value}" for key, value in result.items()
             if key in ("pid", "started_at", "pipe_name", "active_sessions", "omni_refcount",
                        "idle_for_s", "resident_bytes", "protocol_version", "version",
-                       "overlay_state", "input_blocked"))
+                       "overlay_state", "input_blocked", "omni_ready", "omni_reason"))
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
