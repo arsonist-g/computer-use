@@ -25,8 +25,15 @@ line-length = 110
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "W", "I", "B", "UP"]
+# BLE 一并启用：本项目在多个「边界」处刻意捕获宽异常（钩子回调、
+# 连接线程、顶层入口），那些地方必须保留 `except Exception` 并写明理由。
+select = ["E4", "E7", "E9", "F", "W", "I", "B", "UP", "BLE"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 真机测试要「把任何异常都记成一条失败并继续跑」，刻意捕获宽异常。
+# 逐个加 noqa 只会让那 5 行更难读，而豁免范围限定在这两个文件里。
+"tests/native/*.py" = ["BLE001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]

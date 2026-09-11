@@ -1,0 +1,34 @@
+[project]
+name = "cu-omni"
+version = "0.1.0"
+description = "Computer-Use structured-UI worker: OmniParser detection plus optional VLM caption correction"
+requires-python = ">=3.11"
+# 本目录跑在 venv-omni 里，与 base 环境**零代码共享**（DEC-037）。
+# 因此它不得 import `cu` 包里的任何东西，也不得依赖 base 的依赖。
+dependencies = []
+
+[project.optional-dependencies]
+# 检测器全套。三到六 GB，可选安装（DEC-002）：不装它时截图/枚举/输入必须完整可用，
+# 只有 parse 会以 omni_not_installed 显式报错。
+parser = [
+    "ultralytics>=8.3",
+    "transformers>=4.44",
+    "torch>=2.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+# 与 base 同一套选择：BLE 一并启用，因为本 worker 在顶层与每个连接循环处
+# 都要刻意捕获宽异常，那些地方必须保留 `except Exception` 并写明理由。
+select = ["E4", "E7", "E9", "F", "W", "I", "B", "UP", "BLE"]
+ignore = ["E501"]

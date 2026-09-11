@@ -125,6 +125,25 @@ def run_pytest() -> tuple[int, str]:
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
+def purge_bytecode() -> None:
+    """清掉 `__pycache__`。
+
+    必须做：突变期间有机会加载被改过的源码，CPython 会把它编译并缓存下来。
+    还原只是写回**源文件**，那份缓存的字节码仍在，于是后续的 pytest 会拿它去跑，
+    表现为「源码明明是对的，测试却按变异后的行为失败」。
+
+    这不是假想的场景，本轮实测踩到过：`manifest.next_seq` 源码写着 `+= 1`，
+    直接调用却返回 0，清掉 `__pycache__` 后立刻恢复。责任在这一侧，
+    因为只有这个脚本会改写源码。
+    """
+    import shutil
+
+    for cache in ROOT.rglob("__pycache__"):
+        if ".venv" in cache.parts:
+            continue
+        shutil.rmtree(cache, ignore_errors=True)
+
+
 def main() -> int:
     # CI 里默认跳过：本脚本会**临时改写 core/src 下的源码**，
     # 在一台正在被使用的机器上跑它，等于给别人的编辑埋雷。
@@ -164,6 +183,7 @@ def main() -> int:
             # 在 finally **之外**返回：finally 里的 return 会把正在传播的异常吞掉。
             print(f"[还原失败] {label} —— 必须立刻人工检查 {path}")
             return 2
+        purge_bytecode()      # 见 purge_bytecode 的 docstring：陈旧字节码会假装缺陷还在
 
         red = code != 0
         verdict = "红✓" if red else "绿✗（未被覆盖）"
