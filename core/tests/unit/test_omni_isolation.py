@@ -43,8 +43,27 @@ def test_omni_directory_exists_and_has_modules() -> None:
     """守卫的前提：目录真的存在且有内容。目录被挪走时不能静默通过。"""
     modules = _omni_modules()
     assert modules, f"{OMNI_DIR} 下没有 Python 模块，守卫失去对象"
-    assert {p.name for p in modules} >= {"worker.py", "markdown.py"}, \
+    assert "worker.py" in {p.name for p in modules}, \
         f"omni 模块集合与预期不符：{[p.name for p in modules]}"
+
+
+def test_worker_is_self_contained() -> None:
+    """`worker.py` 必须是**自足的单文件** —— 这是它「能单独拷进 omni 环境」的前提。
+
+    这条曾经不成立：markdown 渲染被拆到 `omni/markdown.py`，靠
+    `sys.path.insert` + 裸模块名导入。那个名字与**标准库的 `markdown`** 冲突，
+    编辑器解析到的是标准库那个，四个符号全报未知；更根本的是，「一个文件就能拷走」
+    是本模块的契约，拆开之后这个契约每次 import 都要重新判断一遍。
+
+    所以这条守卫的方向与直觉相反：**不是**要求文件多，而是要求它不依赖同目录的
+    其它模块。同目录新增 `.py` 会让它变红，除非那是刻意加的并从 worker 里移走逻辑。
+    """
+    siblings = {p.name for p in _omni_modules()} - {"worker.py"}
+    assert not siblings, (
+        f"omni/ 下出现了 worker.py 之外的模块：{sorted(siblings)}。\n"
+        "worker 必须是自足单文件 —— 它的契约是「能单独拷进 venv-omni 跑」，"
+        "拆成多文件后导入只能靠裸模块名，既脆弱又与标准库易撞名。"
+    )
 
 
 def test_omni_does_not_import_the_base_package() -> None:

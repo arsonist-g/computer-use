@@ -10,9 +10,10 @@ from pathlib import Path
 
 from ..config import Config
 from ..errors import CUError, ErrorCode
-from ..ids import artifact_name
+from ..ids import artifact_name, format_hwnd
 from . import capture as capture_mod
 from . import input as input_mod
+from . import omni
 from . import windows as windows_mod
 from .base import CaptureResult, InputResult, ParseResult, WindowInfo
 from .controller import WriteSequenceController
@@ -53,12 +54,47 @@ class RealDesktop:
 
     def parse(self, *, hwnd: int | None, image_path: str | None, ai: bool,
               out_dir: Path, seq: int) -> ParseResult:
-        # OmniParser 跑在独立环境（DEC-037），与 base 零代码共享。
-        # 那条通道由 omni worker 提供；未安装时**显式报错**，不静默降级（DEC-002）。
-        raise CUError(
-            ErrorCode.OMNI_NOT_INSTALLED,
-            "OmniParser 未安装或未接入",
-            {"hwnd": hwnd, "image": image_path, "setup": "computer-use setup omni"},
+        """把一张图解析成结构化数据。
+
+        OmniParser 跑在独立环境（DEC-037），与 base **零代码共享** —— 那条通道由
+        `omni.py` 以「拉起子进程 + NDJSON」的方式提供，base 这边不 import 它任何东西。
+        未安装时**显式报错**，不静默降级（DEC-002）。
+
+        `--hwnd` 形态要先自己截一张图：OmniParser 只吃图片路径，不接受窗口句柄。
+        这也是 DEC-025 把 `--hwnd` 与 `--image` 并列的原因 —— 前者是我们的能力，
+        后者是解析器真正需要的东西。
+        """
+        source = Path(image_path) if image_path else None
+        window_ref = None
+        origin: tuple[int, int] | None = None
+        if source is None:
+            if hwnd is None:
+                raise CUError(ErrorCode.INVALID_PARAMS, "必须提供 hwnd 或 image 之一")
+            shot = self.capture(hwnd=hwnd, monitor=None,
+                                image_format=self.config.image_format,
+                                out_dir=out_dir, seq=seq)
+            source = Path(shot.path)
+            window_ref = shot.window
+            origin = shot.origin
+
+        suffix = "omni_ai" if ai else "omni"
+        name = artifact_name("img" if window_ref is None else "win", seq,
+                             hwnd=None if window_ref is None
+                             else format_hwnd(window_ref.hwnd),
+                             title=None if window_ref is None else window_ref.title,
+                             origin=origin,
+                             suffix=suffix, ext="md")
+
+        result = omni.call_parse(
+            image_path=str(source), out_dir=out_dir, file_name=name, ai=ai,
+            vlm={"base_url": self.config.vlm.base_url,
+                 "api_key": self.config.vlm.api_key,
+                 "model_name": self.config.vlm.model_name},
+        )
+        return ParseResult(
+            path=str(result.get("path") or (out_dir / name)),
+            element_count=int(result.get("element_count") or 0),
+            model_name=result.get("model_name"),
         )
 
     # ---- 写 ----

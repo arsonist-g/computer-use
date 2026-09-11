@@ -20,10 +20,7 @@ import json
 import sys
 import traceback
 from pathlib import Path
-
-# 同环境的兄弟模块。**不能**改成 `from cu.xxx` —— 那边没有这个名字。
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from markdown import ContractViolation, merge_descriptions, to_markdown, validate_optimized  # noqa: E402
+from typing import Any
 
 OMNI_NOT_INSTALLED = "omni_not_installed"
 OMNI_FAILED = "omni_failed"
@@ -43,26 +40,399 @@ class WorkerError(Exception):
                 "hint": self.hint, "detail": self.detail}
 
 
+# ===========================================================================
+# markdown 渲染与 AI 优化契约（DEC-011 / DEC-015）
+#
+# 这三段为什么和 worker 放在**同一个文件**里，而不是拆成 `markdown.py`：
+#
+# 本 worker 的全部意义是「独立环境、零代码共享」（架构 §1.5 第 3 条）。
+# 拆成两个文件后，导入只能靠 `sys.path` 把一个裸模块名塞进来，而那个名字
+# （`markdown`）与标准库冲突，编辑器解析到的是标准库那个，四个符号全部报未知。
+# 更根本的是：「能单独拷进 omni 环境跑」是本模块的契约，一个文件才是这条契约
+# 最直白的形式。拆出去省下的行数，换来的是一个每次 import 都要重新判断的边界。
+# ===========================================================================
+
+#: 元素表头。顺序即列序，改它等于改契约。
+COLUMNS = ("#", "type", "bbox", "interactivity", "content")
+
+
+class ContractViolation(Exception):
+    """优化结果违反了冻结契约。"""
+
+
+def _bbox_text(raw: Any) -> str:
+    """`[x1, y1, x2, y2]` → `x1,y1,x2,y2`。
+
+    逗号而不是空格：markdown 表格用 `|` 分隔，bbox 里再用空格会让「一个 bbox」
+    在读表的人眼里变成四个单元格。
+    """
+    if isinstance(raw, (list, tuple)) and len(raw) == 4:
+        return ",".join(str(int(v)) for v in raw)
+    return ""
+
+
+def _cell(text: Any) -> str:
+    """把任意文本塞进一个表格单元格而不破坏表结构。"""
+    out = str(text if text is not None else "")
+    # `|` 会提前结束单元格，换行会结束整行，两者都必须转义。
+    return out.replace("|", "\\|").replace("\n", " ").replace("\r", " ").strip()
+
+
+def _interactivity(raw: Any) -> str:
+    """可交互性是布尔，渲染成 `y` / `n` 而不是 `true` / `false`。
+
+    这是 token 预算最直接的体现：一张表里出现上百次 `false`，换成 `n` 省掉一半，
+    语义不受影响，因为表头已经交代了这一列的含义。
+    """
+    if raw is None:
+        return ""
+    return "y" if raw else "n"
+
+
+def to_markdown(payload: dict, *, source: str = "", model: str | None = None) -> str:
+    """把一次解析的完整结果渲染成 markdown。
+
+    **只换格式，不裁信息**（DEC-015）：元素一个不删，坐标一位不少。
+    省下的是重复的键名，不是内容。AI 需要精确坐标去点击，裁掉坐标等于把功能裁掉。
+    """
+    elements = payload.get("elements") or []
+    lines: list[str] = ["# 界面元素解析", ""]
+    if source:
+        lines.append(f"- source: {source}")
+    if model:
+        # 记下是哪个模型改写的，复盘时才知道该信任到什么程度（DEC-011）。
+        lines.append(f"- description model: {model}")
+    lines.append(f"- elements: {len(elements)}")
+    lines.append("")
+    lines.append("> 坐标为图像像素，原点在图像左上角。"
+                 "换算到屏幕坐标需加上截图返回的 `origin`（DEC-001）。")
+    lines.append("")
+
+    if not elements:
+        lines.append("（未检测到元素）")
+        return "\n".join(lines) + "\n"
+
+    lines.append("| " + " | ".join(COLUMNS) + " |")
+    lines.append("|" + "|".join(["---"] * len(COLUMNS)) + "|")
+    for index, element in enumerate(elements, start=1):
+        if not isinstance(element, dict):
+            continue
+        lines.append("| " + " | ".join([
+            str(index),
+            _cell(element.get("type")),
+            _bbox_text(element.get("bbox")),
+            _cell(_interactivity(element.get("interactivity"))),
+            _cell(element.get("content")),
+        ]) + " |")
+
+    return "\n".join(lines) + "\n"
+
+
+def _bbox_multiset(elements: list) -> list[tuple[int, ...]]:
+    return sorted(
+        tuple(int(v) for v in element.get("bbox", []))
+        for element in elements
+        if isinstance(element, dict) and len(element.get("bbox", [])) == 4
+    )
+
+
+def validate_optimized(original: dict, optimized: dict) -> dict:
+    """校验多模态端点返回的结果是否守约，守约则返回它，违约则抛错。
+
+    契约（DEC-011）只有两条，但两条都是硬要求：
+
+    1. **bbox 冻结**：优化只改描述，不改位置。模型的理解力强于定位力，
+       让它碰坐标等于用它的弱项覆盖检测器的强项。
+    2. **不得新增元素**：模型不能凭空造出检测器没找到的元素，否则 AI 会去点
+       一个不存在的东西。**允许减少**，因为模型可能识别出某个元素是噪声。
+
+    违约时抛错而不是「尽力修正」：静默接受一份被改过坐标的结果，会让 AI
+    点到错误的位置，而它没有任何办法察觉。
+    """
+    original_elements = original.get("elements") or []
+    optimized_elements = optimized.get("elements")
+    if not isinstance(optimized_elements, list):
+        raise ContractViolation("优化结果的 elements 不是数组")
+    if len(optimized_elements) > len(original_elements):
+        raise ContractViolation(
+            f"优化结果新增了元素：原 {len(original_elements)} 个，"
+            f"优化后 {len(optimized_elements)} 个（契约禁止新增）"
+        )
+
+    # 用多重集合比对而不是按下标：模型可能重排元素，但**集合**必须一致。
+    # 按下标比对会把「顺序变了」误判成「坐标被改」。
+    remaining = _bbox_multiset(original_elements)
+    for box in _bbox_multiset(optimized_elements):
+        if box not in remaining:
+            raise ContractViolation(
+                f"优化结果出现原始结果中没有的 bbox：{box}（契约冻结 bbox）")
+        remaining.remove(box)
+    return optimized
+
+
+def merge_descriptions(original: dict, optimized: dict) -> dict:
+    """把优化后的描述并回原始元素，**保留原始 bbox**。
+
+    按 bbox 配对而不是按顺序：位置是检测器给出的事实，描述是模型给的判断，
+    两者靠坐标对齐最可靠。
+    """
+    descriptions: dict[tuple[int, ...], str] = {}
+    for element in optimized.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        box = element.get("bbox")
+        if isinstance(box, list) and len(box) == 4:
+            descriptions[tuple(int(v) for v in box)] = str(element.get("content") or "")
+
+    merged: list[dict] = []
+    for element in original.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        item = dict(element)
+        box = item.get("bbox")
+        if isinstance(box, list) and len(box) == 4:
+            better = descriptions.get(tuple(int(v) for v in box))
+            if better:
+                item["content"] = better
+        merged.append(item)
+    return {**original, "elements": merged}
+
+
 # ---------------------------------------------------------------------------
 # 检测器
+#
+# OmniParser 由 `computer-use setup omni` 装在本环境里，源码在
+# `~/.computer-use/OmniParser`，权重在 `~/.computer-use/models/icon_detect_v3`。
+# 这里**只 import 本环境的东西**，绝不碰 `cu` 包（架构 §1.5 第 3 条）。
 # ---------------------------------------------------------------------------
+
+#: 模型与源码的位置。环境变量可覆盖，便于换机器与测试。
+ENV_OMNI_HOME = "COMPUTER_USE_OMNI_HOME"
+ENV_OMNI_WEIGHTS = "COMPUTER_USE_OMNI_WEIGHTS"
+
+#: 检测框阈值。取 OmniParser 自带的默认值 0.01 —— 它偏召回，
+#: 宁可多报几个再让 AI 忽略，也不要漏掉可点元素。
+BOX_THRESHOLD = 0.01
+#: 标题模型。florence2 是 V2 的默认，比 blip2 小且在这里够用。
+CAPTION_MODEL = "florence2"
+
+_detector_cache: Any = None
+
+
+def _omni_root() -> Path:
+    """OmniParser 源码根目录。"""
+    import os
+
+    override = os.environ.get(ENV_OMNI_HOME)
+    if override:
+        return Path(override)
+    return Path.home() / ".computer-use" / "OmniParser"
+
+
+def _weights_root() -> Path:
+    import os
+
+    override = os.environ.get(ENV_OMNI_WEIGHTS)
+    if override:
+        return Path(override)
+    return Path.home() / ".computer-use" / "models"
+
+
+def _missing_piece() -> str | None:
+    """返回第一处缺失的安装件，全都就位则返回 None。
+
+    逐项检查而不是「import 一下就完事」：这样报错能说清**缺哪一样**，
+    而不是笼统的「OmniParser 未安装」。安装失败最常见的原因是权重没下全，
+    那和依赖没装是两回事，用户要采取的补救也不同。
+    """
+    # 用 `find_spec` 而不是「import 完再不用它」：这里要的只是「在不在」，
+    # 而真正 import torch 要几秒到几十秒。检查不该付加载的代价。
+    import importlib.util
+
+    for module in ("torch", "transformers", "ultralytics"):
+        if importlib.util.find_spec(module) is None:
+            return f"缺少 Python 依赖 {module}"
+
+    root = _omni_root()
+    if not (root / "util" / "omniparser.py").is_file():
+        return f"缺少 OmniParser 源码（{root}）"
+
+    detector = _weights_root() / "icon_detect_v3" / "model.pt"
+    if not detector.is_file():
+        return f"缺少检测权重（{detector}）"
+
+    caption = _weights_root() / "icon_caption_florence"
+    if not (caption / "config.json").is_file():
+        return f"缺少描述模型权重（{caption}）"
+    return None
+
+
+#: 远程代码里声明了、但**运行时可选**的依赖。
+#:
+#: Florence-2 的 `modeling_florence2.py` 把 flash_attn 的 import 写在
+#: `if is_flash_attn_2_available():` 守卫里 —— 在 CPU 上那段永远不会执行。
+#: 但 `transformers.dynamic_module_utils.check_imports` 做的是**文本扫描**，
+#: 不认运行时守卫，于是直接抛
+#: 「requires the following packages that were not found: flash_attn」。
+#:
+#: 这是 transformers 的已知行为，不是 Florence-2 的错。正确做法是告诉它
+#: 这个依赖是可选的，而不是去装一个 CPU 上装了也没用的 CUDA 内核库。
+_OPTIONAL_REMOTE_IMPORTS = frozenset({"flash_attn"})
+
+
+def _allow_optional_remote_imports() -> None:
+    """让 `transformers` 的远程代码导入检查放行运行时可选的依赖。
+
+    包一层 `check_imports` 而不是往 `sys.modules` 塞假模块：后者会让
+    `is_flash_attn_2_available()` 有可能返回真，那才是真的撒谎。
+    这里只是把「文本扫描发现的依赖」与「运行时真正需要的依赖」区分开。
+    """
+    try:
+        from transformers import dynamic_module_utils
+    except ImportError:
+        return
+
+    original = dynamic_module_utils.check_imports
+
+    def check_imports(filename: str | bytes):
+        try:
+            return original(filename)
+        except ImportError as exc:
+            if any(name in str(exc) for name in _OPTIONAL_REMOTE_IMPORTS):
+                return []
+            raise
+
+    dynamic_module_utils.check_imports = check_imports  # type: ignore[assignment]
+
+
+def _stub_unused_paddle() -> None:
+    """把 `paddleocr` 换成一个空壳，绕开它的模块级导入。
+
+    OmniParser 的 `util/utils.py` 在**模块顶层**就 `from paddleocr import PaddleOCR`
+    并立刻实例化一个 `paddle_ocr`，所以它是硬导入。但我们走的是 easyocr 分支
+    （调用 `check_ocr_box(..., use_paddleocr=False)` —— 上游自己就有这个开关），
+    那个对象**永远不会被调用**。
+
+    不装 paddleocr + paddlepaddle 的理由：那是几百 MB，为一段永远不执行的路径付
+    磁盘与 import 代价，与「独立环境、零共享」的初衷（DEC-037 / DEC-039）正好相反。
+
+    这是**依赖注入而非打补丁**：不修改上游源码（它是 `setup omni` 克隆下来的，
+    改了就与上游脱钩），只在导入前把那个用不到的模块占位。
+
+    **只占位 `paddleocr` 这一个名字，绝不碰 `paddle`。** 这一条踩过坑：
+    最初把 `paddle` 也塞进了 `sys.modules`，而 einops 探测张量后端的条件正是
+    `framework_name in sys.modules` —— 于是它以为 paddle 在场，去访问
+    `paddle.Tensor` 与 `paddle.static.Variable`，在真正的推理里炸掉。
+    伪装成一个库是件很容易伤到第三方探测逻辑的事，能不做就不做。
+    """
+    import sys
+    import types
+
+    if "paddleocr" in sys.modules:
+        return
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("paddleocr") is not None:
+            return                # 真装了就别动它
+    except (ImportError, ValueError):
+        pass
+
+    module = types.ModuleType("paddleocr")
+
+    class _UnusedPaddleOCR:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def ocr(self, *args: Any, **kwargs: Any) -> Any:
+            raise WorkerError(
+                OMNI_FAILED,
+                "本 worker 走 easyocr 分支，paddleocr 未安装且不应被调用",
+            )
+
+    module.PaddleOCR = _UnusedPaddleOCR  # type: ignore[attr-defined]
+    sys.modules["paddleocr"] = module
 
 
 def _load_detector():
-    """加载 OmniParser。未安装时**显式报错**，不静默降级（DEC-002）。"""
+    """构造 OmniParser。未安装时**显式报错**，不静默降级（DEC-002）。
+
+    结果缓存：加载要读几百 MB 权重，而 worker 是常驻的，没理由每条命令重来一次。
+    """
+    global _detector_cache
+    if _detector_cache is not None:
+        return _detector_cache
+
+    missing = _missing_piece()
+    if missing is not None:
+        raise WorkerError(
+            OMNI_NOT_INSTALLED,
+            f"OmniParser 不可用：{missing}",
+            hint="运行 `computer-use setup omni` 完成安装",
+            detail={"omni_home": str(_omni_root()), "weights": str(_weights_root())},
+        )
+
+    import sys
+
+    # OmniParser 的 `util` 是包内相对导入（`from util.utils import ...`），
+    # 所以必须把**源码根目录**放进 sys.path，而不是 util 目录。
+    root = str(_omni_root())
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+    _stub_unused_paddle()               # 必须在 import util.omniparser 之前
+    _allow_optional_remote_imports()    # 必须在 Florence-2 模型加载之前
+
     try:
-        from ultralytics import YOLO  # noqa: F401
+        from util.omniparser import Omniparser
     except ImportError as exc:
         raise WorkerError(
             OMNI_NOT_INSTALLED,
-            f"OmniParser 未安装（缺少 {exc.name}）",
-            hint="运行 `computer-use setup omni`",
+            f"OmniParser 依赖不全（{exc.name}）",
+            hint="运行 `computer-use setup omni` 重装",
         ) from exc
-    raise WorkerError(
-        OMNI_NOT_INSTALLED,
-        "OmniParser 尚未接入本进程",
-        hint="检测器接线未完成；在它完成前，`parse` 一律显式报错而不是返回空结果",
-    )
+
+    detector = Omniparser({
+        "som_model_path": str(_weights_root() / "icon_detect_v3" / "model.pt"),
+        "caption_model_name": CAPTION_MODEL,
+        "caption_model_path": str(_weights_root() / "icon_caption_florence"),
+        "BOX_TRESHOLD": BOX_THRESHOLD,
+    })
+    _detector_cache = detector
+    return detector
+
+
+def _to_elements(parsed: list, width: int, height: int) -> list[dict]:
+    """把 OmniParser 的产出转成我们的元素形状，**并把比例坐标换成像素**。
+
+    OmniParser 用 `output_coord_in_ratio=True` 调用，bbox 是 0~1 的比例。
+    而本项目的坐标契约一律是**物理像素**（DEC-001），所以必须乘回图像尺寸。
+
+    这一步做错的后果很隐蔽：所有框都挤在左上角一小块里，看着像检测失败，
+    实际是坐标没换算。所以它在自检里有一条专门的守卫。
+    """
+    elements: list[dict] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        bbox = item.get("bbox")
+        if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+            continue
+        try:
+            x1, y1, x2, y2 = (float(v) for v in bbox)
+        except (TypeError, ValueError):
+            continue
+        # 比例 → 像素。取整到像素，AI 拿到的就是能直接点的整数。
+        pixel_box = [int(round(x1 * width)), int(round(y1 * height)),
+                     int(round(x2 * width)), int(round(y2 * height))]
+        elements.append({
+            "type": str(item.get("type") or ""),
+            "bbox": pixel_box,
+            "interactivity": bool(item.get("interactivity")),
+            "content": str(item.get("content") or ""),
+            "source": "omni",
+        })
+    return elements
 
 
 def detect(image_path: str) -> dict:
@@ -71,10 +441,41 @@ def detect(image_path: str) -> dict:
     这里刻意抛错而不是返回空结果：**「没有元素」与「检测器不可用」必须是两件事**。
     返回空结果会让 AI 认为界面上什么都没有，然后据此做决策。
     """
-    if not Path(image_path).exists():
-        raise WorkerError(OMNI_FAILED, f"图片不存在：{image_path}")
+    import base64
+    import io
+
+    source = Path(image_path)
+    if not source.is_file():
+        raise WorkerError(OMNI_FAILED, f"图片不存在：{image_path}",
+                          detail={"image": image_path})
+
     detector = _load_detector()
-    return detector(image_path)
+
+    try:
+        from PIL import Image
+
+        with Image.open(source) as image:
+            width, height = image.size
+            buffer = io.BytesIO()
+            image.convert("RGB").save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception as exc:  # noqa: BLE001
+        raise WorkerError(OMNI_FAILED, f"图片无法读取：{exc}",
+                          detail={"image": image_path}) from exc
+
+    try:
+        # 第一个返回值是画好标注框的图。我们不需要它 —— 产品只取结构化数据，
+        # AI 看的是原始截图。刻意不返回它，省掉一次多余的图片编码。
+        _labelled_image, parsed = detector.parse(encoded)
+    except Exception as exc:  # noqa: BLE001
+        # 推理失败与「没检测到元素」是两回事，必须分开报。
+        raise WorkerError(OMNI_FAILED, f"检测失败：{type(exc).__name__}: {exc}",
+                          detail={"image": image_path}) from exc
+
+    return {
+        "elements": _to_elements(parsed or [], width, height),
+        "image": {"path": str(source), "width": width, "height": height},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -189,18 +590,21 @@ def handle_parse(params: dict) -> dict:
     image_path = params.get("image")
     out_dir = params.get("out_dir")
     file_name = params.get("file_name")
-    if not image_path or not out_dir or not file_name:
-        raise WorkerError(OMNI_FAILED, "omni.parse 需要 image / out_dir / file_name")
+    if not (isinstance(image_path, str) and isinstance(out_dir, str)
+            and isinstance(file_name, str)):
+        raise WorkerError(OMNI_FAILED, "omni.parse 需要 image / out_dir / file_name（均为字符串）")
 
     detected = detect(image_path)
 
-    model_name = None
+    model_name: str | None = None
     payload = detected
-    ai = bool(params.get("ai"))
-    if ai:
-        optimized = optimize_with_vlm(detected, image_path, params.get("vlm") or {})
+    raw_vlm = params.get("vlm")
+    vlm_params: dict = raw_vlm if isinstance(raw_vlm, dict) else {}
+    if params.get("ai"):
+        optimized = optimize_with_vlm(detected, image_path, vlm_params)
         payload = merge_descriptions(detected, optimized)
-        model_name = (params.get("vlm") or {}).get("model_name")
+        raw_model = vlm_params.get("model_name")
+        model_name = raw_model if isinstance(raw_model, str) else None
 
     target = Path(out_dir) / file_name
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -215,11 +619,15 @@ ROUTES = {"omni.parse": handle_parse, "system.ping": lambda _p: {"ok": True}}
 
 
 def dispatch(request: dict) -> dict:
+    """按方法名路由。`method` 来自管道，可能是任何 JSON 值，因此逐层校验。"""
     method = request.get("method")
+    if not isinstance(method, str):
+        raise WorkerError(OMNI_FAILED, f"请求缺少 method 字段：{method!r}")
     handler = ROUTES.get(method)
     if handler is None:
         raise WorkerError(OMNI_FAILED, f"未知方法：{method}")
-    return handler(request.get("params") or {})
+    params = request.get("params")
+    return handler(params if isinstance(params, dict) else {})
 
 
 def _force_utf8_streams() -> None:
