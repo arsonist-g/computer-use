@@ -23,7 +23,9 @@ from typing import Any
 
 from .. import PROTOCOL_VERSION, __version__
 from ..config import Config, apply_set
-from ..desktop.base import Desktop, UnavailableDesktop
+from ..desktop import build_desktop
+from ..desktop.base import Desktop
+from ..desktop.controller import WriteSequenceController
 from ..errors import CUError, ErrorCode
 from ..ids import now_iso, parse_hwnd
 from ..ipc import PIPE_NAME, DaemonLock, IpcServer, read_lock_pid
@@ -31,8 +33,6 @@ from ..manifest import ScreenshotRecord, StructuredRecord
 from .ops import OpsEntry
 from .sessions import Sessions
 from .writelock import WriteLock
-from ..desktop import build_desktop
-from ..desktop.controller import WriteSequenceController
 
 #: 一次写命令在 ops.md 里的命令名，以及它对应的桌面层方法。
 _WRITE_METHODS = frozenset({

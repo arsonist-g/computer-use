@@ -1,0 +1,36 @@
+{
+  "name": "@arsonist-g/computer-use",
+  "version": "0.1.0",
+  "description": "Windows desktop control for AI agents: screens, windows, mouse, keyboard, and structured UI parsing",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "computer-use": "bin/computer-use.mjs"
+  },
+  "files": [
+    "bin/",
+    "core/src/",
+    "core/pyproject.toml",
+    "core/README.md",
+    "SKILL.md",
+    "skill-zh.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "win32"
+  ],
+  "keywords": [
+    "ai",
+    "agent",
+    "desktop",
+    "automation",
+    "windows",
+    "computer-use",
+    "gui"
+  ],
+  "scripts": {
+    "lint": "node --check bin/computer-use.mjs"
+  }
+}

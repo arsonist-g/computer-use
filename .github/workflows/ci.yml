@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-and-unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: 安装 Python
+        run: uv python install 3.12
+
+      - name: 建环境并安装开发依赖
+        working-directory: core
+        run: |
+          uv venv --python 3.12
+          uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
+
+      - name: ruff
+        run: .venv/Scripts/python.exe -m ruff check core/src core/tests
+
+      - name: 单元测试
+        working-directory: core
+        run: ../.venv/Scripts/python.exe -m pytest -q
+
+      - name: 红相验证（变异法）
+        run: .venv/Scripts/python.exe core/tests/native/red_verification.py --ci
+
+      - name: Node 启动器语法检查
+        run: node --check bin/computer-use.mjs

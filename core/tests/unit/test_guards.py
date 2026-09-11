@@ -28,18 +28,18 @@ CONTRACT_LAYER_MODULES = ["cu.errors", "cu.protocol", "cu.config"]
 # 在干净子进程里导入契约层后检查 sys.modules。
 # 为什么必须起新解释器：本 pytest 进程可能已被插件/其他测试拉入 numpy 等，
 # 同进程检查会把「别人的污染」误判为契约层引入的依赖。
-_GUARD_SCRIPT = """
+_GUARD_SCRIPT = f"""
 import importlib
 import json
 import sys
 
-for name in {modules!r}:
+for name in {CONTRACT_LAYER_MODULES!r}:
     importlib.import_module(name)
 
-forbidden = {forbidden!r}
+forbidden = {FORBIDDEN_IMPORT_MODULES!r}
 bad = sorted(m for m in forbidden if m in sys.modules)
 print(json.dumps(bad))
-""".format(modules=CONTRACT_LAYER_MODULES, forbidden=FORBIDDEN_IMPORT_MODULES)
+"""
 
 
 def test_guard_base_env_import_chain_excludes_heavy_libraries() -> None:

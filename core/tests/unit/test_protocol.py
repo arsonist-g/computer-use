@@ -10,7 +10,6 @@ oracle 标注：
 from __future__ import annotations
 
 import io
-import json
 
 import pytest
 
@@ -114,14 +113,14 @@ def test_dump_line_keeps_chinese_raw_ensure_ascii_false() -> None:
     """
     # oracle: specified —— 领域规则：ensure_ascii=False；docstring：UTF-8。
     raw = dump_line({"title": "未命名 - 记事本"})
-    assert raw == '{"title":"未命名 - 记事本"}\n'.encode("utf-8")
+    assert raw == '{"title":"未命名 - 记事本"}\n'.encode()
     assert b"\\u" not in raw
 
 
 def test_dump_line_keeps_emoji_raw() -> None:
     # oracle: derived —— ensure_ascii=False 对非 BMP 字符同样成立。
     raw = dump_line({"title": "截图-🎯-完成"})
-    assert raw == '{"title":"截图-🎯-完成"}\n'.encode("utf-8")
+    assert raw == '{"title":"截图-🎯-完成"}\n'.encode()
     assert b"\\ud83c" not in raw
 
 

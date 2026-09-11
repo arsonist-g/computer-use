@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -125,6 +126,13 @@ def run_pytest() -> tuple[int, str]:
 
 
 def main() -> int:
+    # CI 里默认跳过：本脚本会**临时改写 core/src 下的源码**，
+    # 在一台正在被使用的机器上跑它，等于给别人的编辑埋雷。
+    # `--ci` 显式开启（CI 的 runner 是隔离且一次性的，没有这个问题）。
+    if "--ci" not in sys.argv and os.environ.get("CI") != "true":
+        print("跳过红相验证：它会临时改写 core/src。用 --ci 显式运行。")
+        return 0
+
     # 基线：必须全绿，否则后面的红相没有意义
     code, out = run_pytest()
     baseline = out.strip().splitlines()[-1] if out.strip() else "?"
@@ -143,17 +151,19 @@ def main() -> int:
             print(f"[锚点未命中] {label} ({filename})")
             continue
 
+        restore_failed = False
         path.write_bytes(text.replace(old, new, 1).encode("utf-8"))
         try:
             code, out = run_pytest()
             summary = out.strip().splitlines()[-1] if out.strip() else "?"
         finally:
             path.write_bytes(original)
-            restored = path.read_bytes()
-            if restored != original:
-                failures.append(f"{label}：还原后与原文不一致！")
-                print(f"[还原失败] {label} —— 必须立刻人工检查 {path}")
-                return 2
+            # 还原必须逐字节一致：本项目靠这条保证「变异不残留」。
+            restore_failed = path.read_bytes() != original
+        if restore_failed:
+            # 在 finally **之外**返回：finally 里的 return 会把正在传播的异常吞掉。
+            print(f"[还原失败] {label} —— 必须立刻人工检查 {path}")
+            return 2
 
         red = code != 0
         verdict = "红✓" if red else "绿✗（未被覆盖）"

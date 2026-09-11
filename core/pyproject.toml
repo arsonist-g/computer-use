@@ -20,7 +20,9 @@ packages = ["src/cu"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py311"
+# 与 .venv / CI 实际使用的解释器对齐。声明 py311 会把 3.12 才允许的
+# f-string 嵌套引号语法判为语法错误，而运行时本来就是 3.12。
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "W", "I", "B", "UP"]
