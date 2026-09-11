@@ -112,14 +112,6 @@ def random_token(length: int = 8) -> str:
     return secrets.token_hex(length // 2)
 
 
-#: 结构化数据文件名里的后缀分隔符。**下划线，不是连字符**。
-#: data-model.md §3.2 的模式行把它写成 `[-omni]`，但 §3.1 / §3.3 / DEC-012 里
-#: 三处**真实文件名**一律是下划线（`win-0x0001A2B-未命名-记事本_omni-100x200-0004.md`
-#: / `img-photo-0007_omni.md`），DEC-025 的 `--image` 形态也依赖 `_omni.md` 结尾。
-#: 示例优先于模式行 —— 模式行的方括号是「可选」的标记法，不是字面量。
-#: 这条冲突已记入 DEC-043。
-PARSED_SUFFIX_SEPARATOR = "_"
-
 #: 结构化数据后缀的拼写。`omni` 与 `omni_ai` 是两种工件（DEC-011）：
 #: 同一张图可以解析两次，且必须落在不同文件里，否则后写的覆盖前一个。
 PARSED_SUFFIXES = frozenset({"omni", "omni_ai"})
@@ -128,20 +120,20 @@ PARSED_SUFFIXES = frozenset({"omni", "omni_ai"})
 def is_parsed_name(name: str) -> bool:
     """文件名是否是「由图片解析出的结构化数据」。
 
-    这是 `_omni.md` / `_omni_ai.md` 的**唯一**判定入口。配额清理（DEC-017 阶段 1）
-    靠它决定「哪些 md 可以随来源图片一起删」—— 判定错了两边都糟：
-    判定过宽会删掉操作日志，过窄会让结构化数据只能等到阶段 2 才消失。
+    **两种落点都要认**，这正是一处曾经漂移过的地方：
+      - 解析一张**截图**得到的 md，名字与来源图同一形状（含坐标）：
+        `win-0x0001A2B-记事本-omni-100x200-0004.md`
+      - 解析一张**外部图片**（DEC-025 的 `--image` 形态，无坐标）：
+        `img-photo-omni-0007.md`
+
+    这是 `_omni` / `_omni_ai` 的**唯一**判定入口。配额清理（DEC-017 阶段 1）靠它
+    决定「哪些 md 可以随来源图片一起删」—— 判定错了两边都糟：过宽会删掉操作日志，
+    过窄会让结构化数据只能等到阶段 2 才消失（等于永远删不掉）。
     """
     if not name.endswith(".md") or name in ("ops.md", "session.json"):
         return False
     stem = name[:-3]
-    for suffix in PARSED_SUFFIXES:
-        if stem.endswith(f"{PARSED_SUFFIX_SEPARATOR}{suffix}"):
-            return True
-        # 带坐标的形态里后缀后面还有 `-{x}x{y}-{seq}` 结尾。
-        if f"{PARSED_SUFFIX_SEPARATOR}{suffix}-" in stem:
-            return True
-    return False
+    return any(f"-{suffix}-" in stem for suffix in PARSED_SUFFIXES)
 
 
 def artifact_name(
@@ -157,24 +149,24 @@ def artifact_name(
     """`{kind}-{hwnd}-{title_slug}[-{suffix}]-{x}x{y}-{seq:04d}.{ext}`。
 
     `suffix` 是结构化数据的 `omni` / `omni_ai`（data-model.md §3.2 / DEC-011）。
+    后缀永远紧跟 `-` 且落在**序号之前**，两种落点都遵守这一条：
 
-    **两种不同的落点，取决于有没有坐标**（§3.2 末尾：「seq 在扩展名之前」）：
-
-      - 有坐标（窗口 / 全屏）：`win-…-{title}[-{suffix}]-{x}x{y}-{seq:04d}.{ext}`
-      - 无坐标（`img` 外部图片）：`img-{title}_{suffix}-{seq:04d}.{ext}`
+      - 有坐标（窗口 / 全屏）：`win-…-{title}-{suffix}-{x}x{y}-{seq:04d}.{ext}`
+      - 无坐标（`img` 外部图片）：`img-{title}-{suffix}-{seq:04d}.{ext}`
 
     外部图片没有 hwnd 与坐标，硬套 `{x}x{y}` 只能编造无意义的占位值，
     所以走更短的模式 —— 但它仍带零填充序号，同一会话内的字典序依然等于时间序。
+
+    统一成连字符（而不是 data-model.md §3.1/§3.3 示例里的 `_omni`）是为了让
+    `is_parsed_name` 只有一条判定规则：**后缀两侧都是连字符**。示例与模式行
+    本来就不一致（模式行写 `[-omni]`），取模式行的连字符更自洽。
     """
     parts = [kind]
     if hwnd is not None:
         parts.append(hwnd)
     if title is not None:
         parts.append(slug_title(title))
-    if suffix and origin is None:
-        # 无坐标：后缀用下划线贴在标题后面，再跟零填充序号。
-        parts[-1] = f"{parts[-1]}{PARSED_SUFFIX_SEPARATOR}{suffix}"
-    elif suffix:
+    if suffix:
         parts.append(suffix)
     if origin is not None:
         parts.append(f"{origin[0]}x{origin[1]}")

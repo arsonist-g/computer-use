@@ -74,8 +74,8 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
     (
         "清单校验不再拒绝非法 status（应视为 orphaned）",
         "manifest.py",
-        "        if status not in SESSION_STATUSES:",
-        "        if False and status not in SESSION_STATUSES:",
+        "        if not (isinstance(status, str) and status in SESSION_STATUSES):",
+        "        if not (isinstance(status, str) and (True or status in SESSION_STATUSES)):",
         "契约层之外：这里应当红（若仍绿说明该行为未被覆盖）",
     ),
     (
