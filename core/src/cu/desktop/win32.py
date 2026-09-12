@@ -249,6 +249,9 @@ gdi32.CreateCompatibleDC.restype = wintypes.HDC
 gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
 gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
 gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+# `SelectObject` 返回**被顶替掉的那个对象**（不是刚选进去的），必须留着重选回去，
+# 否则删不掉原对象。它返回的是句柄，所以 restype 必须是句柄类型 —— 不声明会按
+# 32 位截断（spike 陷阱 2 的同一类问题）。
 gdi32.SelectObject.restype = wintypes.HGDIOBJ
 gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
 gdi32.DeleteObject.restype = wintypes.BOOL

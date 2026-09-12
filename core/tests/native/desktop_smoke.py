@@ -396,6 +396,44 @@ def _screen_size():
     return _read_screen()
 
 
+def t8_overlay_blit_succeeds() -> None:
+    """覆盖层**真的能上屏**吗 —— 断言 `_blit` 不抛异常、且 `UpdateLayeredWindow` 成功。
+
+    这条存在的理由很具体：`_blit` 里漏了 `SelectObject(mem_dc, bitmap)` 时，
+    `SetDIBits` 写进一个不属于任何 DC 的位图，`UpdateLayeredWindow` 返回
+    `ERROR_GEN_FAILURE(31)`，**窗口整个是空的**。而旧代码不检查返回值 ——
+    于是「覆盖层完全不可见」在代码上完全看不出来，静默失败了两轮才被用户发现。
+
+    这条守卫就是那个缺失的断言。它是**渲染管线的端到端**检查：缓冲有内容 → 选进 DC
+    → SetDIBits → ULW 成功。不涉及窗口是否对用户可见（那只能人眼验）。
+    """
+    from cu.desktop.overlay import ControlOverlay, OverlayState, _read_screen
+
+    overlay = ControlOverlay()
+    overlay._screen = _read_screen()
+    overlay._ensure_window()
+    try:
+        overlay._state = OverlayState.ACTIVE
+        overlay._state_since = time.monotonic()
+        overlay.set_target((900, 600, 300, 200))
+        overlay.set_cursor((1200, 700))
+        width = 480
+        height = max(1, int(overlay._screen.height * width / overlay._screen.width))
+        pixels = overlay._build_pixels(width, height)
+        try:
+            overlay._blit(pixels, width, height)
+        except Exception as exc:  # noqa: BLE001
+            record("T8 覆盖层能上屏（UpdateLayeredWindow）", False,
+                   f"_blit 抛异常：{type(exc).__name__}: {exc}")
+            return
+        nonzero = sum(1 for i in range(3, len(pixels), 4) if pixels[i] > 0)
+        record("T8 覆盖层能上屏（UpdateLayeredWindow）", nonzero > 0,
+               f"_blit 成功（无异常）· 缓冲非零像素 {nonzero} · "
+               f"尺寸 {width}x{height} → 屏幕 {overlay._screen.width}x{overlay._screen.height}")
+    finally:
+        overlay._destroy()
+
+
 def _grab_frame():
     """取一帧全屏像素。DXGI 屏幕帧唯一可用的解码路径就是它自己的 to_numpy。"""
     from windows_capture import DxgiDuplicationSession
@@ -445,6 +483,7 @@ def main() -> int:
     t4_input()
     t6_overlay_exclusion(out_dir)
     t7_target_and_cursor()
+    t8_overlay_blit_succeeds()
     if args.blocking:
         t5_blocking()
     else:

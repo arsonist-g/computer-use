@@ -198,6 +198,8 @@ class ControlOverlay:
         self._buffer = None
         self._bitmap = None
         self._memdc = None
+        #: 建表面时被顶替掉的那个 DC 自带位图 —— 释放时必须先选回去。
+        self._old_bitmap = None
         self._buffer_size = (0, 0)
 
     # ---- 状态机 ----
@@ -309,14 +311,7 @@ class ControlOverlay:
             if self._hwnd is not None:
                 w.user32.DestroyWindow(self._hwnd)
                 self._hwnd = None
-            if self._bitmap:
-                w.gdi32.DeleteObject(self._bitmap)
-                self._bitmap = None
-            if self._memdc:
-                w.gdi32.DeleteDC(self._memdc)
-                self._memdc = None
-            self._buffer = None
-            self._buffer_size = (0, 0)
+            self._release_surface()
 
     def _show(self) -> None:
         if self._hwnd is not None:
@@ -557,14 +552,19 @@ class ControlOverlay:
         screen = self._screen
         assert screen is not None
         if (width, height) != self._buffer_size:
-            if self._bitmap:
-                w.gdi32.DeleteObject(self._bitmap)
-            if self._memdc:
-                w.gdi32.DeleteDC(self._memdc)
+            self._release_surface()
             screen_dc = w.user32.GetDC(None)
             self._memdc = w.gdi32.CreateCompatibleDC(screen_dc)
             self._bitmap = w.gdi32.CreateCompatibleBitmap(screen_dc, width, height)
             w.user32.ReleaseDC(None, screen_dc)
+            if not self._memdc or not self._bitmap:
+                raise CUError(ErrorCode.INTERNAL_ERROR,
+                              f"覆盖层离屏表面创建失败 err={w.kernel32.GetLastError()}")
+            # **必须把位图选进 DC。** 不选的话，DC 里还是它自带的 1×1 单色位图：
+            # `SetDIBits` 写进一个不属于任何 DC 的位图，`UpdateLayeredWindow`
+            # 拿到的 DC 里只有那个 1×1 —— 窗口整个是空的，且返回 `ERROR_GEN_FAILURE`。
+            # 这一行漏掉时，症状是「覆盖层完全不可见」，排查了很久才落到这里。
+            self._old_bitmap = w.gdi32.SelectObject(self._memdc, self._bitmap)
             self._buffer_size = (width, height)
             self._buffer = ctypes.create_string_buffer(width * height * 4)
 
@@ -582,20 +582,44 @@ class ControlOverlay:
         gdi32.SetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT,
                                     wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p,
                                     wintypes.UINT]
+
+        if not gdi32.SetDIBits(self._memdc, self._bitmap, 0, height, self._buffer,
+                               ctypes.byref(info), _DIB_RGB_COLORS):
+            raise CUError(ErrorCode.INTERNAL_ERROR,
+                          f"SetDIBits 失败 err={w.kernel32.GetLastError()}")
+
+        # 降采样缓冲放大回全屏。插值交给 ULW 的拉伸 —— HALFTONE 更柔，
+        # 与「光晕没有硬边界」的设计一致。设失败不影响正确性，故不检查。
         gdi32.SetStretchBltMode.restype = ctypes.c_int
         gdi32.SetStretchBltMode.argtypes = [wintypes.HDC, ctypes.c_int]
-
-        gdi32.SetDIBits(self._memdc, self._bitmap, 0, height, self._buffer,
-                        ctypes.byref(info), _DIB_RGB_COLORS)
-        # HALFTONE：降采样缓冲放大回全屏时的插值方式，柔化与光晕风格一致。
         gdi32.SetStretchBltMode(self._memdc, 4)
 
         source = _POINT(0, 0)
         size = _SIZE(screen.width, screen.height)
         blend = _BLENDFUNCTION(_AC_SRC_OVER, 0, 255, _AC_SRC_ALPHA)
-        w.user32.UpdateLayeredWindow(
+        w.kernel32.SetLastError(0)
+        ok = w.user32.UpdateLayeredWindow(
             self._hwnd, None, ctypes.byref(_POINT(screen.x, screen.y)), ctypes.byref(size),
             self._memdc, ctypes.byref(source), 0, ctypes.byref(blend), _ULW_ALPHA)
+        if not ok:
+            # 静默失败在这里的后果是「覆盖层看不见，但代码看不出问题」——
+            # 必须抛出来（架构 §2.5：诊断日志要能回答「覆盖层为何不可见」）。
+            raise CUError(ErrorCode.INTERNAL_ERROR,
+                          f"UpdateLayeredWindow 失败 err={w.kernel32.GetLastError()}")
+
+    def _release_surface(self) -> None:
+        """释放离屏表面。先把旧位图选回去，再删位图 —— 顺序反了删不掉。"""
+        if self._memdc and self._old_bitmap:
+            w.gdi32.SelectObject(self._memdc, self._old_bitmap)
+            self._old_bitmap = None
+        if self._bitmap:
+            w.gdi32.DeleteObject(self._bitmap)
+            self._bitmap = None
+        if self._memdc:
+            w.gdi32.DeleteDC(self._memdc)
+            self._memdc = None
+        self._buffer = None
+        self._buffer_size = (0, 0)
 
 
 def _blend(buffer: bytearray, width: int, x: int, y: int,
