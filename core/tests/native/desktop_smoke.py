@@ -146,6 +146,42 @@ def t3_capture(out_dir: Path, hwnd: int | None) -> None:
         record("T3 全屏截图", False, f"{type(exc).__name__}: {exc}")
 
 
+def t3b_capture_origin_is_extended_frame(out_dir: Path, hwnd: int | None) -> None:
+    """窗口截图的 `origin` 必须是 **DWM 扩展框**的左上角，不是 `GetWindowRect` 的。
+
+    这条守卫来自一次实测：`GetWindowRect` 是 900x560，而 WGC 交付的图像是 886x553，
+    两者恰好差 14x7 —— 那是 Win10/11 那条**不可见调整边框**（本机 125% 缩放下
+    左右各 7px、下边 7px）。拿 `GetWindowRect` 当原点，`origin + 图像坐标`
+    就会横向偏 7px，而 constraint「截图与坐标同源」要求两者严格一致。
+
+    偏差只有个位数像素，点按钮这类大目标察觉不到 —— 只有把基准钉死才守得住。
+    """
+    if hwnd is None:
+        record("T3b 截图 origin 基准", False, "没有可用于截图的目标窗口")
+        return
+    frame = capture_mod.w.extended_frame_bounds(hwnd)
+    if frame is None:
+        record("T3b 截图 origin 基准", False, "DwmGetWindowAttribute 取不到扩展框")
+        return
+    try:
+        result = capture_mod.capture_window(hwnd, out_dir, 3, _window_info(hwnd))
+    except Exception as exc:  # noqa: BLE001
+        record("T3b 截图 origin 基准", False, f"{type(exc).__name__}: {exc}")
+        return
+    want_origin = (frame[0], frame[1])
+    want_size = (frame[2] - frame[0], frame[3] - frame[1])
+    got_size = (result.width, result.height)
+    rect = capture_mod.w.window_rect(hwnd) or (0, 0, 0, 0)
+    border = (rect[0] - frame[0], rect[1] - frame[1],
+              rect[2] - frame[2], rect[3] - frame[3])
+    record(
+        "T3b 截图 origin 基准 = DWM 扩展框",
+        tuple(result.origin) == want_origin and got_size == want_size,
+        f"origin={tuple(result.origin)}（扩展框 {want_origin}）· 图像 {got_size}"
+        f"（扩展框 {want_size}）· GetWindowRect 多出的不可见边框(左,上,右,下)={border}",
+    )
+
+
 def _window_info(hwnd: int):
     monitors = windows_mod.display_context().monitors
     for info in windows_mod.enumerate_windows(monitors, all_windows=True):
@@ -599,6 +635,7 @@ def main() -> int:
     t1_dpi()
     hwnd = t2_windows()
     t3_capture(out_dir, hwnd)
+    t3b_capture_origin_is_extended_frame(out_dir, hwnd)
     t4_input()
     t6_overlay_exclusion(out_dir)
     t7_target_ring()

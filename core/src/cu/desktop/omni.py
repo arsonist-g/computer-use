@@ -85,6 +85,15 @@ def available() -> tuple[bool, str]:
     return True, ""
 
 
+#: worker 报回来的错误码 → 契约里的错误码。两者是同一套字符串
+#: （`omni/worker.py` 的 `OMNI_NOT_INSTALLED` / `OMNI_FAILED` / `VLM_FAILED`）。
+_WORKER_ERROR_CODES = {
+    "omni_not_installed": ErrorCode.OMNI_NOT_INSTALLED,
+    "omni_failed": ErrorCode.OMNI_FAILED,
+    "vlm_failed": ErrorCode.VLM_FAILED,
+}
+
+
 def call_parse(*, image_path: str, out_dir: Path, file_name: str, ai: bool,
                vlm: dict | None = None, extra_elements: list[dict] | None = None,
                timeout: float = DEFAULT_TIMEOUT) -> dict:
@@ -150,7 +159,13 @@ def call_parse(*, image_path: str, out_dir: Path, file_name: str, ai: bool,
         error = response["error"] or {}
         data = error.get("data") or {}
         code = str(data.get("code") or "omni_failed")
-        mapped = ErrorCode.OMNI_NOT_INSTALLED if code == "omni_not_installed" else ErrorCode.OMNI_FAILED
+        # worker 的错误码与契约里的错误码**是同一套字符串**（`omni/worker.py` 顶部那三个
+        # 常量），所以这里要按码透传，而不是一律塌缩成 omni_failed。
+        #
+        # 塌缩的代价是 AI 拿不到正确的分支依据：端点坏了会被报成「解析进程异常，重试一次」，
+        # 而正确的处置是「检查 base_url / api_key，且原始结构化数据仍然可用」——
+        # 两件事的下一步动作完全不同。实测：配错端点时收到的就是 omni_failed。
+        mapped = _WORKER_ERROR_CODES.get(code, ErrorCode.OMNI_FAILED)
         raise CUError(mapped, str(error.get("message") or "解析失败"),
                       detail={"hint": data.get("hint"), **(data.get("detail") or {})})
     return response.get("result") or {}

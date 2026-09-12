@@ -59,6 +59,32 @@ function haveUv() {
   return probe.status === 0;
 }
 
+/**
+ * `core/pyproject.toml` 里的 `requires-python`。
+ *
+ * 建环境时必须把它交给 uv。不给的话 uv 用自己的默认解释器 —— 那是**这台机器**的
+ * 默认，不是本项目的要求。实测踩到过：本机默认是 CPython 3.10.20，而项目要求
+ * >=3.11，于是 `uv venv` 建出一个 3.10 的环境，紧接着装依赖必然无解，
+ * 报错长这样：
+ *
+ *     Because the current Python version (3.10.20) does not satisfy Python>=3.11
+ *     and cu==0.1.0 depends on Python>=3.11, we can conclude that cu==0.1.0
+ *     cannot be used. And because only cu==0.1.0 is available and you require cu…
+ *
+ * 这段话读起来像「PyPI 上有另一个叫 cu 的包」，完全指不到真正的原因（解释器太旧）。
+ * 把约束显式传过去，uv 会自己挑一个满足条件的解释器（必要时下载一个托管的），
+ * 全新安装路径才不依赖用户机器上恰好装了什么。
+ */
+function requiresPython() {
+  try {
+    const text = readFileSync(PYPROJECT, "utf8");
+    const matched = text.match(/^\s*requires-python\s*=\s*["']([^"']+)["']/m);
+    return matched ? matched[1] : "";
+  } catch {
+    return "";
+  }
+}
+
 function run(cmd, args, options = {}) {
   return spawnSync(cmd, args, {
     stdio: options.capture ? "pipe" : "inherit",
@@ -90,7 +116,9 @@ function syncEnvironment({ force = false } = {}) {
 
   if (!existsSync(VENV_PYTHON)) {
     process.stderr.write(`computer-use: 创建 Python 环境 ${VENV_DIR}\n`);
-    const created = run("uv", ["venv", VENV_DIR]);
+    const wanted = requiresPython();
+    const venvArgs = ["venv", VENV_DIR, ...(wanted ? ["--python", wanted] : [])];
+    const created = run("uv", venvArgs);
     if (created.status !== 0) {
       process.stderr.write(`computer-use: 创建环境失败（exit ${created.status}）\n`);
       process.exit(1);
@@ -101,7 +129,10 @@ function syncEnvironment({ force = false } = {}) {
   const installArgs = ["pip", "install", "--python", VENV_PYTHON, "-e", CORE_DIR];
   let installed = run("uv", installArgs, { capture: true });
   if (installed.status !== 0) {
-    // 单次回退官方源，并把两次失败的原委都透出来（DEC-042）。
+    // 单次回退官方源（DEC-042）。**两次的报错都要透出来** —— 只印第二次的话，
+    // 真正的原因（镜像 403、索引里没有这个包）会被后一次的失败盖掉，
+    // 而用户按提示去换索引时完全不知道第一次错在哪。
+    const firstAttempt = (installed.stderr || installed.stdout || "").trim() || "(无输出)";
     process.stderr.write("computer-use: 默认索引失败，回退 https://pypi.org/simple 重试一次\n");
     installed = run(
       "uv",
@@ -109,11 +140,13 @@ function syncEnvironment({ force = false } = {}) {
       { capture: true },
     );
     if (installed.status !== 0) {
+      const secondAttempt = (installed.stderr || installed.stdout || "").trim() || "(无输出)";
       process.stderr.write(
         `computer-use: 依赖安装失败。\n` +
-          `  默认索引: ${installed.stderr?.trim() || "(无输出)"}\n` +
-          `  提示: 若报 403/404，通常是镜像源不含该包；可用 ` +
-          `COMPUTER_USE_INDEX_URL 指定索引后重试。\n`,
+          `  第一次（默认索引）:\n${firstAttempt}\n` +
+          `  第二次（https://pypi.org/simple）:\n${secondAttempt}\n` +
+          `  提示: 若报 403/404，通常是镜像源不含该包；` +
+          `可用 ` + "`COMPUTER_USE_INDEX_URL`" + ` 指定索引后重试。\n`,
       );
       process.exit(1);
     }

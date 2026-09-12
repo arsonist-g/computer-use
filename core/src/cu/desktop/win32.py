@@ -411,8 +411,10 @@ def class_name(hwnd: int) -> str:
 def window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
     """`(left, top, right, bottom)`。窗口不存在返回 None。
 
-    这是**含标题栏**的外框矩形 —— 与 WGC 截图的图像 (0,0) 精确对应（spike 已实测），
-    因此 `screen = (left + image_x, top + image_y)` 无偏移，落实 CONSTRAINT-003。
+    **这是含不可见调整边框的外框**，比屏幕上看到的窗口大一圈（本机 125% 缩放下
+    左右各多 7px，下边多 7px）。搬动/改尺寸、判断窗口位置用它；**截图坐标换算不能用它**
+    —— WGC 交付的图像覆盖的是 `extended_frame_bounds`，用这个矩形当原点会横向偏 7px。
+    坐标换算见 `capture.capture_window`。
     """
     rect = RECT()
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
@@ -421,10 +423,12 @@ def window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
 
 
 def extended_frame_bounds(hwnd: int) -> tuple[int, int, int, int] | None:
-    """DWM 的真实可见边界（去掉 Win10 的不可见阴影边框）。
+    """DWM 的真实可见边界（去掉 Win10/11 的不可见调整边框）。
 
-    只用于**报告**给 AI 的矩形，不用于坐标换算 —— 换算必须用 `window_rect`，
-    因为那才是截图像素与屏幕的对应关系。
+    **窗口截图的原点必须用它**：WGC 交付的位图就是这个矩形的尺寸（实测
+    GetWindowRect 900x560 ↔ 图像 886x553 ↔ 扩展框 886x553），所以
+    `screen = 扩展框左上角 + 图像坐标` 才是同源的（CONSTRAINT-003）。
+    取不到时返回 None（DWM 关闭等），调用方退回 `window_rect`。
     """
     rect = RECT()
     result = dwmapi.DwmGetWindowAttribute(

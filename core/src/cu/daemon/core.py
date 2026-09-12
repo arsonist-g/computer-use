@@ -425,6 +425,12 @@ class Daemon:
         updated.save()
         self.config = updated
         self.sessions.storage_limit_bytes = updated.storage_limit_bytes
+        # **桌面层也要换**：它持有的是构造时那一份 Config，只换 daemon 自己那份的话，
+        # 桌面层读到的仍是旧值。实测踩到过：`config set vlm.base_url` 指向一个死端点后，
+        # `parse --ai` 照样打到了原来的模型（跑了 101 秒并成功返回），
+        # 于是「改配置」这个动作在 vlm.* 上等于没发生。
+        if hasattr(self.desktop, "config"):
+            self.desktop.config = updated
         return updated.to_dict()
 
     # ---- daemon ----

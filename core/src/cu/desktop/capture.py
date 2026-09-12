@@ -38,9 +38,26 @@ class CaptureLayerError(Exception):
 
 
 def _frame_is_black(frame, threshold: int = 2) -> bool:
-    """全黑判定。用 numpy 的均值而不是逐像素循环 —— 4K 帧有 1400 万像素。"""
+    """全黑判定。用 numpy 的均值而不是逐像素循环 —— 4K 帧有 1400 万像素。
+
+    **两种 frame 取像素的方式不一样**，这里必须都认：
+
+      - WGC 的 frame 有 `frame_buffer`（已是 numpy 数组）；
+      - `DxgiDuplicationFrame` **没有这个属性**（它内部叫 `_raw_buffer`），
+        唯一的解码入口是 `to_numpy()`。
+
+    曾经只读 `frame_buffer`，于是 DXGI 每次取帧都抛 `AttributeError`、
+    被下面的兜底吞成「不黑」——**黑帧检测在 DXGI 路径上等于没有**，
+    新建会话后的第一帧（spike 陷阱 4 记录过：整帧全黑）被原样存成了文件。
+    实测：同一会话连续 5 帧，第 1 帧 `to_numpy().mean()=0.00`、
+    第 2 帧起 `86.87 / 110.27…`。所以这条判据不是锦上添花，它是 DXGI 层
+    唯一能挡住「静默返回一张黑图」的东西。
+    """
     try:
-        return float(frame.frame_buffer.mean()) <= threshold
+        buffer = getattr(frame, "frame_buffer", None)
+        if buffer is None:
+            buffer = frame.to_numpy()
+        return float(buffer.mean()) <= threshold
     except Exception:  # noqa: BLE001 —— 拿不到 buffer 时宁可当作「不黑」，交给上层继续
         return False
 
@@ -239,9 +256,14 @@ def capture_window(hwnd: int, out_dir: Path, seq: int, window: WindowInfo,
                    image_format: str = "png") -> CaptureResult:
     """按 hwnd 截图，走降级链。
 
-    `origin` = 该窗口 `GetWindowRect()` 的左上角。spike 实测 WGC 窗口截图**含标题栏**，
-    图像 (0,0) 精确对应 (left, top)，因此点击换算 `screen = (left + x, top + y)` 无偏移
-    —— 落实 CONSTRAINT-003。
+    `origin` 取 **DWM 扩展框**（`extended_frame_bounds`）的左上角，不是 `GetWindowRect`。
+
+    为什么：`GetWindowRect` 含 Win10/11 那条**不可见的调整边框**（本机 125% 缩放下
+    左右各 7px），而 WGC 交付的图像只覆盖可见框 —— 实测同一时刻
+    `GetWindowRect` 是 900x560、图像是 886x553，两者恰好差 14x7。若拿
+    `GetWindowRect` 当原点，`screen = origin + 图像坐标` 就会横向偏 7px，
+    违反 CONSTRAINT-003（截图像素坐标系与 click 坐标系必须同源）。
+    （曾经的注释写着「图像 (0,0) 精确对应 GetWindowRect」—— 那是错的，见这条实测。）
     """
     from ..ids import format_hwnd
 
@@ -249,7 +271,10 @@ def capture_window(hwnd: int, out_dir: Path, seq: int, window: WindowInfo,
     if rect is None:
         raise CUError(ErrorCode.WINDOW_NOT_FOUND,
                       f"窗口不存在：{format_hwnd(hwnd)}", {"hwnd": format_hwnd(hwnd)})
-    left, top, right, bottom = rect
+    # 扩展框取不到时（DWM 关闭、窗口尚未合成）退回 GetWindowRect —— 那是次优解，
+    # 但比拒绝截图好，且此时两者的差通常也为 0。
+    frame = w.extended_frame_bounds(hwnd) or rect
+    left, top = frame[0], frame[1]
     origin = (left, top)
     name = artifact_name("win", seq, hwnd=format_hwnd(hwnd), title=window.title,
                          origin=origin, ext=image_format)
@@ -264,7 +289,7 @@ def capture_window(hwnd: int, out_dir: Path, seq: int, window: WindowInfo,
         failures.append(f"WGC: {exc}")
 
     try:
-        width, height = _capture_dxgi(window.monitor, (left, top, right, bottom), path)
+        width, height = _capture_dxgi(window.monitor, rect, path)
         return CaptureResult(path=str(path), origin=origin, width=width, height=height,
                              layer="dxgi", kind="window", window=window)
     except Exception as exc:  # noqa: BLE001

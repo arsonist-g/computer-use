@@ -743,7 +743,25 @@ def handle_parse(params: dict) -> dict:
     raw_vlm = params.get("vlm")
     vlm_params: dict = raw_vlm if isinstance(raw_vlm, dict) else {}
     if params.get("ai"):
-        optimized = optimize_with_vlm(detected, image_path, vlm_params)
+        try:
+            optimized = optimize_with_vlm(detected, image_path, vlm_params)
+        except WorkerError as exc:
+            # VLM 失败时**先把已经算出来的检测结果落盘**，再报错。
+            #
+            # 检测是这条链上最贵的一环（CPU 上数十秒），而 VLM 那一步只负责「把描述
+            # 改写得更准」。让后者失败把前者一起废掉，等于一次网络抖动就白跑一次解析。
+            # 而且 `vlm_failed` 的提示语里写着「原始结构化数据仍可用」—— 不落盘，
+            # 那句提示就是假的。
+            #
+            # 落盘用的是**基础名**（`-omni-`），不是调用方给的 `-omni_ai-`：
+            # 这份文件里没有经过 AI 优化，用 ai 的名字会让下一次读取的人以为优化成功了。
+            base_name = file_name.replace("-omni_ai-", "-omni-")
+            base_path = Path(out_dir) / base_name
+            base_path.parent.mkdir(parents=True, exist_ok=True)
+            base_path.write_text(
+                to_markdown(detected, source=image_path, diag=_diag), encoding="utf-8")
+            exc.detail = {**(exc.detail or {}), "base_markdown": str(base_path)}
+            raise
         payload = merge_descriptions(detected, optimized)
         raw_model = vlm_params.get("model_name")
         model_name = raw_model if isinstance(raw_model, str) else None
