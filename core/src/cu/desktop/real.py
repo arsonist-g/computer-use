@@ -13,7 +13,7 @@ from ..errors import CUError, ErrorCode
 from ..ids import artifact_name, format_hwnd
 from . import capture as capture_mod
 from . import input as input_mod
-from . import omni
+from . import omni, uia
 from . import windows as windows_mod
 from .base import CaptureResult, InputResult, ParseResult, WindowInfo
 from .controller import WriteSequenceController
@@ -67,6 +67,8 @@ class RealDesktop:
         source = Path(image_path) if image_path else None
         window_ref = None
         origin: tuple[int, int] | None = None
+        uia_elements: list[dict] = []
+        uia_note = ""
         if source is None:
             if hwnd is None:
                 raise CUError(ErrorCode.INVALID_PARAMS, "必须提供 hwnd 或 image 之一")
@@ -76,6 +78,22 @@ class RealDesktop:
             source = Path(shot.path)
             window_ref = shot.window
             origin = shot.origin
+
+            # UIA 文本通道（可选增强）。在 base 读、把结果交给 worker 合并 ——
+            # UIA 是 Win32 调用，属于这一侧；worker 只管「图片 → 结构化数据」。
+            # **拿不到不算失败**：Electron/自绘界面本来就不暴露控件树，
+            # 那走原来的检测器路径即可（CONSTRAINT-005）。
+            uia_result = uia.read_window(hwnd)
+            if uia_result.usable:
+                # UIA 给的是**屏幕坐标**，检测器给的是**图像坐标**。先减掉 origin
+                # 归一化，否则合并时两个坐标系对不上，表现是「UIA 好像没生效」。
+                uia_elements = [element.to_dict() for element in uia_result.elements]
+                for element in uia_elements:
+                    box = element["bbox"]
+                    box[0] -= origin[0]
+                    box[1] -= origin[1]
+            else:
+                uia_note = uia_result.reason
 
         suffix = "omni_ai" if ai else "omni"
         name = artifact_name("img" if window_ref is None else "win", seq,
@@ -90,11 +108,13 @@ class RealDesktop:
             vlm={"base_url": self.config.vlm.base_url,
                  "api_key": self.config.vlm.api_key,
                  "model_name": self.config.vlm.model_name},
+            extra_elements=uia_elements or None,
         )
         return ParseResult(
             path=str(result.get("path") or (out_dir / name)),
             element_count=int(result.get("element_count") or 0),
             model_name=result.get("model_name"),
+            uia_reason=uia_note,
         )
 
     # ---- 写 ----

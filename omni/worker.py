@@ -53,7 +53,9 @@ class WorkerError(Exception):
 # ===========================================================================
 
 #: 元素表头。顺序即列序，改它等于改契约。
-COLUMNS = ("#", "type", "bbox", "interactivity", "content")
+#: `source` 标出这条来自哪个通道 —— UIA 的精确文本与检测器的框混在一张表里，
+#: 不标来源的话读的人无从判断哪条该信（实测两者质量差一个数量级）。
+COLUMNS = ("#", "type", "bbox", "interactivity", "content", "source")
 
 
 class ContractViolation(Exception):
@@ -89,7 +91,8 @@ def _interactivity(raw: Any) -> str:
     return "y" if raw else "n"
 
 
-def to_markdown(payload: dict, *, source: str = "", model: str | None = None) -> str:
+def to_markdown(payload: dict, *, source: str = "", model: str | None = None,
+                diag: str = "") -> str:
     """把一次解析的完整结果渲染成 markdown。
 
     **只换格式，不裁信息**（DEC-015）：元素一个不删，坐标一位不少。
@@ -103,6 +106,8 @@ def to_markdown(payload: dict, *, source: str = "", model: str | None = None) ->
         # 记下是哪个模型改写的，复盘时才知道该信任到什么程度（DEC-011）。
         lines.append(f"- description model: {model}")
     lines.append(f"- elements: {len(elements)}")
+    if diag:
+        lines.append(f"- merge: {diag}")
     lines.append("")
     lines.append("> 坐标为图像像素，原点在图像左上角。"
                  "换算到屏幕坐标需加上截图返回的 `origin`（DEC-001）。")
@@ -123,9 +128,80 @@ def to_markdown(payload: dict, *, source: str = "", model: str | None = None) ->
             _bbox_text(element.get("bbox")),
             _cell(_interactivity(element.get("interactivity"))),
             _cell(element.get("content")),
+            _cell(element.get("source")),
         ]) + " |")
 
     return "\n".join(lines) + "\n"
+
+
+#: 判定「两个框是同一个元素」的重叠阈值。与 base 侧 `desktop/uia.py` 的取值一致 ——
+#: 两边算的是同一件事，阈值不同会让同一份数据在两侧合并出不同结果。
+_MATCH_THRESHOLD = 0.5
+
+
+def _overlap_ratio(a: tuple, b: tuple) -> float:
+    """交集面积 / 较小者面积。用较小者：小框落在大框里时应判为高重叠。"""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    iy = max(0, min(ay + ah, by + bh) - max(ay, by))
+    smaller = min(aw * ah, bw * bh) or 1
+    return (ix * iy) / smaller
+
+
+def _merge_uia(detector: list, uia: list) -> list:
+    """把 UIA 元素并入检测器产出。
+
+    **策略在实测后反转了一次，这里是反转后的版本。** 最初写的是「检测器的 bbox 保留、
+    UIA 只覆盖文本」，理由是「检测器对『哪里有可点的东西』覆盖更全」。那个假设是错的 ——
+    它来自一次读到别的会话文件的误判。叠加对照图（`tests/native/uia_coord_check.py`
+    产出的 calib-*.png，绿=UIA / 红=检测器）显示：
+
+      - **UIA 的框精确对齐控件**（标签页、菜单栏、工具栏、状态栏，一个不差）；
+      - **检测器的框大量错位**，甚至有一个横跨编辑器中部的大框。
+
+    所以现在反过来：**UIA 是基底**（框与文本都精确），检测器只用来补 UIA 覆盖不到的区域。
+
+    这样也**不再依赖「两侧框能否匹配」** —— 那一步本来就脆弱（检测器坐标在两次调用间
+    会变），而现在变成「UIA 有就用它，没有就退回检测器」，逻辑单一且不会因匹配失败
+    而静默退化。
+
+    `inner` 的判定：检测器元素若与**任一** UIA 元素重叠超过阈值，就认为 UIA 已经覆盖了
+    这块区域，丢弃它；否则保留 —— 那正是 UIA 拿不到的东西（自绘部件、画布内容）。
+    """
+    if not uia:
+        return [dict(item) for item in detector]
+
+    def rect_of(box) -> tuple | None:
+        if not (isinstance(box, (list, tuple)) and len(box) == 4):
+            return None
+        try:
+            x1, y1, x2, y2 = (int(v) for v in box)
+        except (TypeError, ValueError):
+            return None
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return (x1, y1, x2 - x1, y2 - y1)
+
+    uia_rects = [r for r in (rect_of(e.get("bbox")) for e in uia if isinstance(e, dict)) if r]
+
+    merged = [{
+        "type": str(e.get("type") or ""),
+        "bbox": [int(v) for v in e["bbox"]],
+        "interactivity": bool(e.get("interactivity")),
+        "content": str(e.get("content") or ""),
+        "source": "uia",
+    } for e in uia if isinstance(e, dict) and rect_of(e.get("bbox"))]
+
+    for item in detector:
+        rect = rect_of(item.get("bbox"))
+        if rect is None:
+            continue
+        if any(_overlap_ratio(rect, other) >= _MATCH_THRESHOLD for other in uia_rects):
+            continue          # UIA 已覆盖这块区域，它的文本更可信
+        merged.append({**item, "source": item.get("source") or "detector"})
+
+    return merged
 
 
 def _bbox_multiset(elements: list) -> list[tuple[int, ...]]:
@@ -596,6 +672,21 @@ def handle_parse(params: dict) -> dict:
 
     detected = detect(image_path)
 
+    # UIA 文本通道（可选）：调用方在 base 环境里读好 UIA，把元素一起送进来合并。
+    # 为什么由 base 读而不是 worker：UIA 是 Win32 调用，而 base 才是桌面层所在；
+    # worker 的职责是「图片 → 结构化数据」，不该管窗口。
+    extra = params.get("extra_elements")
+    _diag = ""
+    if isinstance(extra, list) and extra:
+        _before = detected.get("elements") or []
+        _after = _merge_uia(_before, extra)
+        _uia_n = sum(1 for _e in _after if _e.get("source") == "uia")
+        _diag = (f"uia={_uia_n} detector={len(_after) - _uia_n} "
+                 f"(detector input {len(_before)}, uia input {len(extra)})")
+        detected = {"elements": _after, "image": detected.get("image")}
+    else:
+        _diag = f"uia_in=0 det_in={len(detected.get('elements') or [])}"
+
     model_name: str | None = None
     payload = detected
     raw_vlm = params.get("vlm")
@@ -609,7 +700,8 @@ def handle_parse(params: dict) -> dict:
     target = Path(out_dir) / file_name
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
-        to_markdown(payload, source=image_path, model=model_name), encoding="utf-8"
+        to_markdown(payload, source=image_path, model=model_name, diag=_diag),
+        encoding="utf-8"
     )
     return {"path": str(target), "element_count": len(payload.get("elements") or []),
             "model_name": model_name}

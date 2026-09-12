@@ -86,7 +86,8 @@ def available() -> tuple[bool, str]:
 
 
 def call_parse(*, image_path: str, out_dir: Path, file_name: str, ai: bool,
-               vlm: dict | None = None, timeout: float = DEFAULT_TIMEOUT) -> dict:
+               vlm: dict | None = None, extra_elements: list[dict] | None = None,
+               timeout: float = DEFAULT_TIMEOUT) -> dict:
     """调 worker 解析一张图。返回 worker 的 `result` 字典。
 
     子进程通信走 stdio NDJSON，与 daemon↔客户端同形 —— 换传输不换格式（架构 §1.4）。
@@ -107,6 +108,9 @@ def call_parse(*, image_path: str, out_dir: Path, file_name: str, ai: bool,
         "file_name": file_name,
         "ai": bool(ai),
         "vlm": vlm or {},
+        # UIA 元素（可选）：由 base 侧读好，交给 worker 与检测器产出合并。
+        # 图像字节流不在这条通道上（架构 §1.5 第 3 条），元素列表不是图像。
+        "extra_elements": extra_elements or [],
     }}
 
     env = dict(os.environ)

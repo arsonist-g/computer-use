@@ -94,6 +94,9 @@ class ParseResult:
     element_count: int
     model_name: str | None = None
     inline_markdown: str | None = None
+    #: UIA 文本通道没参与的原因。**不是错误**：自绘/Electron 界面拿不到控件树
+    #: 是应用的属性，那走检测器路径即可。有值时说明这次结果里没有 UIA 的精确文本。
+    uia_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"path": self.path, "element_count": self.element_count}
@@ -101,6 +104,8 @@ class ParseResult:
             out["model_name"] = self.model_name
         if self.inline_markdown is not None:
             out["markdown"] = self.inline_markdown
+        if self.uia_reason:
+            out["uia_note"] = self.uia_reason
         return out
 
 
