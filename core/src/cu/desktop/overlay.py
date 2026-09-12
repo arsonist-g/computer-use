@@ -72,8 +72,10 @@ _FALLOFF_EXPONENT = 2.6
 _FALLOFF_VERTICAL = 0.45
 #: 降采样后的渲染宽度。光晕是低频信号，降采样 + 放大与设计意图同向。
 _RENDER_WIDTH = 480
-#: 光谱流速：Arming 快，Active 慢（DEC-030 的 2s / 7s 一圈）。
-_SPIN_SECONDS = {"arming": 2.0, "active": 7.0}
+#: 光谱流速（秒/圈）。**武装期与活动期同速** —— 原设计让武装期 2s、活动期 7s，
+#: 用流速本身区分阶段；但真机上快流读起来是躁动而不是信息，而阶段已经由
+#: 「有没有琥珀目标框」和胶囊文案表达清楚了。多一倍转速换不来等价的收益。
+_SPIN_SECONDS = 7.0
 
 # ---------------------------------------------------------------------------
 # 原生分辨率元素（一律按**屏幕像素**，不随分辨率放大 —— MASTER §2.5）
@@ -86,9 +88,15 @@ _TARGET_GLOW_PX = 24
 #: 由 OS 与 DPI 决定，不随分辨率放大，否则 4K 上会变成巨大箭头。
 _CURSOR_GLOW_PX = 52
 
-#: 胶囊：内边距/圆角/字号跟随字体尺寸，与屏幕大小无关（MASTER §2.5 的例外①）。
-_PILL_TOP_RATIO = 0.045        # --pill-top: 4.5cqmin —— 这一项**是**比例
-_PILL_FONT_PX = 14             # --text-pill
+#: 胶囊。原设计（MASTER §2.5 例外①）让字号与屏幕无关地固定 14px，理由是
+#: 「跟随字体尺寸」；但真机上那在 1440p 下明显偏小，改为**按屏幕短边缩放**。
+#: 其余尺寸（内边距、圆角、圆点、键帽）一律由字号按 `_PILL_BASE_FONT_PX` 等比推出 ——
+#: 整颗胶囊的内部比例与设计稿一致，只是整体放大或缩小。
+_PILL_TOP_RATIO = 0.045        # --pill-top: 4.5cqmin
+_PILL_FONT_RATIO = 0.0153      # 字号 / 屏幕短边（1440 → 22px）
+_PILL_FONT_MIN = 13            # 1080p 及以下别太小
+_PILL_FONT_MAX = 40            # 5K 及以上别太大
+_PILL_BASE_FONT_PX = 14        # 设计稿字号；下面这些常量都以它为基准
 _PILL_KEY_FONT_PX = 13         # --text-key
 _PILL_PAD_Y = 8                # --space-2
 _PILL_PAD_X = 16               # --space-4
@@ -733,11 +741,18 @@ class ControlOverlay:
         只算靠近边缘的那一圈：距离 >= reach 的地方 alpha 为 0，直接跳过。
         这一步把 4K 全屏的 830 万像素压到实际需要计算的那一圈，
         是在不引入数值库的前提下让纯 Python 渲染可行的关键。
+
+        Stopping / Error 态**整条光晕是一个色相**（冻结琥珀 / 冻结红），不是
+        「一条不转的彩虹」。这两件事只差一行：冻结的是**色相本身**，不是
+        光谱的旋转相位 —— 只冻相位的话，屏幕上仍是一片彩色，只是不流动了。
         """
         frozen = _FROZEN_HUE.get(state)
-        spin = _SPIN_SECONDS.get(str(state), 7.0)
-        angle0 = (frozen if frozen is not None
-                  else ((time.monotonic() - self._state_since) / spin) % 1.0)
+        angle0 = 0.0 if frozen is not None else (
+            (time.monotonic() - self._state_since) / _SPIN_SECONDS % 1.0)
+        frozen_rgb = None
+        if frozen is not None:
+            red, green, blue = colorsys.hsv_to_rgb(frozen, 0.85, 1.0)
+            frozen_rgb = (red, green, blue)
 
         buffer = bytearray(width * height * 4)
         cx, cy = width / 2.0, height / 2.0
@@ -768,10 +783,13 @@ class ControlOverlay:
                     value = int(t ** _FALLOFF_EXPONENT * alpha_scale * vertical)
                     if value <= 1:
                         continue
-                    # 色相沿**屏幕中心的方向角**走 —— 光谱是绕一圈的环，不是沿边平移。
-                    hue = (math.atan2((y + 0.5) - cy, (x + 0.5) - cx)
-                           / two_pi + angle0) % 1.0
-                    red, green, blue = hsv_to_rgb(hue, 0.85, 1.0)
+                    if frozen_rgb is None:
+                        # 色相沿**屏幕中心的方向角**走 —— 光谱是绕一圈的环，不是沿边平移。
+                        hue = (math.atan2((y + 0.5) - cy, (x + 0.5) - cx)
+                               / two_pi + angle0) % 1.0
+                        red, green, blue = hsv_to_rgb(hue, 0.85, 1.0)
+                    else:
+                        red, green, blue = frozen_rgb
                     index = row + x * 4
                     buffer[index] = int(blue * value)
                     buffer[index + 1] = int(green * value)
@@ -824,39 +842,53 @@ class ControlOverlay:
     def _build_pill(self, screen: _Screen, state: OverlayState) -> _Detail:
         """顶部胶囊：**纯深色实体胶囊 + 文字，无光晕、无描边**（DEC-031 第 3 条）。
 
-        尺寸跟随字号（固定 px），不随屏幕缩放 —— 唯一按比例的是它距屏幕顶边的距离
-        （`--pill-top: 4.5cqmin`）。深色桌面上靠 `--shadow-pill` 里那 1px 浅色扩散环
-        分离，那不是装饰，是它在深色背景上唯一的边界（D5b）。
+        整颗胶囊随屏幕短边缩放（见 `_PILL_FONT_RATIO`），内部比例保持不变。
+        深色桌面上靠 `--shadow-pill` 里那圈浅色扩散环分离 —— 那不是装饰，
+        是它在深色背景上唯一的边界（D5b）。
         """
         text = self._renderer()
         lead, key, tail = _PILL_CONTENT[state]
-        lead_w, line_h = text.extent(_PILL_FONT_PX, lead)
-        sep_w = text.extent(_PILL_FONT_PX, "·")[0]
+
+        font_px = _pill_font_px(screen)
+        k = font_px / _PILL_BASE_FONT_PX
+        key_font_px = max(9, round(_PILL_KEY_FONT_PX * k))
+        pad_x = round(_PILL_PAD_X * k)
+        pad_y = round(_PILL_PAD_Y * k)
+        gap = round(_PILL_GAP * k)
+        dot = round(_PILL_DOT_PX * k)
+        ring = max(1, round(_PILL_RING_PX * k))
+        key_pad_x = round(_PILL_KEY_PAD_X * k)
+        key_pad_y = max(1, round(_PILL_KEY_PAD_Y * k))
+        key_radius = max(2, round(_PILL_KEY_RADIUS * k))
+
+        lead_w, line_h = text.extent(font_px, lead)
+        sep_w = text.extent(font_px, "·")[0]
         key_w = key_h = key_text_w = 0
         if key is not None:
-            key_text_w, cell_h = text.extent(_PILL_KEY_FONT_PX, key)
-            key_w = key_text_w + 2 * _PILL_KEY_PAD_X
-            key_h = cell_h + 2 * _PILL_KEY_PAD_Y
-        tail_w = text.extent(_PILL_FONT_PX, tail)[0] if tail else 0
+            key_text_w, cell_h = text.extent(key_font_px, key)
+            key_w = key_text_w + 2 * key_pad_x
+            key_h = cell_h + 2 * key_pad_y
+        tail_w = text.extent(font_px, tail)[0] if tail else 0
 
-        inner = _PILL_DOT_PX + _PILL_GAP + lead_w
+        inner = dot + gap + lead_w
         if key is not None:
-            inner += _PILL_GAP + sep_w + _PILL_GAP + key_w + _PILL_GAP + tail_w
-        pill_w = _PILL_PAD_X * 2 + inner
-        pill_h = _PILL_PAD_Y * 2 + max(line_h, _PILL_DOT_PX, key_h)
+            inner += gap + sep_w + gap + key_w + gap + tail_w
+        pill_w = pad_x * 2 + inner
+        pill_h = pad_y * 2 + max(line_h, dot, key_h)
 
-        side, above, below = _PILL_MARGIN
+        side = round(_PILL_MARGIN[0] * k)
+        above = round(_PILL_MARGIN[1] * k)
+        below = round(_PILL_MARGIN[2] * k)
         width, height = pill_w + side * 2, pill_h + above + below
         buffer = bytearray(width * height * 4)
         left, top = side, above
         right, bottom = left + pill_w, top + pill_h
 
-        self._paint_pill_shadows(buffer, width, height, left, top, right, bottom)
-        # 1px 浅色扩散环：先铺满整块（含外扩 1px），再用胶囊面盖掉内部，剩下的就是环。
+        self._paint_pill_shadows(buffer, width, height, left, top, right, bottom, k)
+        # 浅色扩散环：先铺满整块（含外扩），再用胶囊面盖掉内部，剩下的就是环。
         _fill_round_rect(buffer, width, height,
-                         left - _PILL_RING_PX, top - _PILL_RING_PX,
-                         right + _PILL_RING_PX, bottom + _PILL_RING_PX,
-                         pill_h / 2.0 + _PILL_RING_PX,
+                         left - ring, top - ring, right + ring, bottom + ring,
+                         pill_h / 2.0 + ring,
                          (255, 255, 255), int(_PILL_RING_ALPHA * 255))
         _fill_round_rect(buffer, width, height, left, top, right, bottom,
                          pill_h / 2.0, _PILL_SURFACE,
@@ -864,26 +896,23 @@ class ControlOverlay:
 
         # 逐段排布。
         runs: list[_TextRun] = []
-        x = left + _PILL_PAD_X + _PILL_DOT_PX + _PILL_GAP
+        x = left + pad_x + dot + gap
         line_top = top + max(0, (pill_h - line_h) // 2)
-        runs.append(_TextRun(_PILL_FONT_PX, x, line_top, lead_w, line_h, lead,
-                             _PILL_TEXT))
+        runs.append(_TextRun(font_px, x, line_top, lead_w, line_h, lead, _PILL_TEXT))
         x += lead_w
         if key is not None:
-            x += _PILL_GAP
-            runs.append(_TextRun(_PILL_FONT_PX, x, line_top, sep_w, line_h, "·",
-                                 _PILL_DIM))
-            x += sep_w + _PILL_GAP
+            x += gap
+            runs.append(_TextRun(font_px, x, line_top, sep_w, line_h, "·", _PILL_DIM))
+            x += sep_w + gap
             key_top = top + max(0, (pill_h - key_h) // 2)
-            # 键帽：1px 描边 + 4px 圆角，非按钮（overlay.md §2.3）。
+            # 键帽：1px 描边 + 圆角，非按钮（overlay.md §2.3）。
             _stroke_round_rect(buffer, width, height, x, key_top, x + key_w,
-                               key_top + key_h, _PILL_KEY_RADIUS,
+                               key_top + key_h, key_radius,
                                (255, 255, 255), int(_PILL_KEY_BORDER_ALPHA * 255))
-            runs.append(_TextRun(_PILL_KEY_FONT_PX, x + _PILL_KEY_PAD_X,
-                                 key_top + _PILL_KEY_PAD_Y, key_text_w, key_h, key,
-                                 _PILL_DIM))
-            x += key_w + _PILL_GAP
-            runs.append(_TextRun(_PILL_FONT_PX, x, line_top, tail_w, line_h, tail,
+            runs.append(_TextRun(key_font_px, x + key_pad_x, key_top + key_pad_y,
+                                 key_text_w, key_h, key, _PILL_DIM))
+            x += key_w + gap
+            runs.append(_TextRun(font_px, x, line_top, tail_w, line_h, tail,
                                  _PILL_TEXT))
 
         # 文字：GDI 出覆盖率（黑底白字的灰度），这里按各段自己的颜色与 alpha 合成。
@@ -895,9 +924,8 @@ class ControlOverlay:
 
         # 圆点：色相来自当前状态，不取光谱（圆点表示「哪个阶段」，不是「在流动」）。
         red, green, blue = colorsys.hsv_to_rgb(_PILL_HUE[state], 0.85, 1.0)
-        _fill_disc(buffer, width, height,
-                   left + _PILL_PAD_X + _PILL_DOT_PX / 2.0, top + pill_h / 2.0,
-                   _PILL_DOT_PX / 2.0,
+        _fill_disc(buffer, width, height, left + pad_x + dot / 2.0,
+                   top + pill_h / 2.0, dot / 2.0,
                    (int(blue * 255), int(green * 255), int(red * 255)), 255)
 
         pill_top = int(screen.short_side * _PILL_TOP_RATIO)
@@ -905,7 +933,8 @@ class ControlOverlay:
                        screen.y + pill_top - above, width, height)
 
     def _paint_pill_shadows(self, buffer: bytearray, width: int, height: int,
-                            left: int, top: int, right: int, bottom: int) -> None:
+                            left: int, top: int, right: int, bottom: int,
+                            scale: float) -> None:
         """`--shadow-pill` 的两层柔影：偏移 + 模糊的深色圆角矩形。
 
         用可分离盒式模糊近似高斯（跑两趟）。区域只有几十像素见方、而且只在状态
@@ -913,11 +942,13 @@ class ControlOverlay:
         在屏幕上，缺一层浮起来的重量。
         """
         for offset_y, blur, alpha in _PILL_SHADOWS:
+            dy = round(offset_y * scale)
+            radius = max(1, round(blur * scale) // 2)
             mask = bytearray(width * height)
-            _fill_round_rect(mask, width, height, left, top + offset_y, right,
-                             bottom + offset_y, (bottom - top) / 2.0,
+            _fill_round_rect(mask, width, height, left, top + dy, right,
+                             bottom + dy, (bottom - top) / 2.0,
                              (255, 255, 255), 255)
-            _box_blur(mask, width, height, max(1, blur // 2))
+            _box_blur(mask, width, height, radius)
             _overlay_alpha(buffer, mask, width, height, int(alpha * 255))
 
     def _build_target(self, screen: _Screen) -> _Detail | None:
@@ -999,6 +1030,12 @@ class ControlOverlay:
 
 def _screen_key(screen: _Screen) -> tuple[int, int, int, int]:
     return (screen.x, screen.y, screen.width, screen.height)
+
+
+def _pill_font_px(screen: _Screen) -> int:
+    """胶囊字号：按屏幕短边缩放，夹在上下限内。整颗胶囊的尺寸都由它推出。"""
+    return max(_PILL_FONT_MIN,
+               min(_PILL_FONT_MAX, round(screen.short_side * _PILL_FONT_RATIO)))
 
 
 def _round_rect_distance(px: float, py: float, left: float, top: float,
