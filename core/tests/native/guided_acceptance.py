@@ -184,12 +184,18 @@ def section1() -> None:
     if helper is None:
         record("1.4", "不适用", "未能启动子进程辅助程序")
     else:
-        say(f"        子进程 pid={helper.pid} 已封锁。")
-        input("        按回车让脚本杀掉它 …… ")
+        say(f"        子进程 pid={helper.pid} 已封锁（封锁期间你可以试着敲字 —— 应当没反应）。")
+        say("        2 秒后脚本自动杀掉它。**你不要去动手杀进程** ——")
+        say("        上一版让你自己杀，结果你把脚本本身也一起杀了（这里向你道歉）。")
+        # 不能用 input() 等确认：终端里 Ctrl+C 会就地杀掉本脚本，
+        # 而「用任务管理器杀」又容易连脚本一起杀。所以改成纯等待。
+        for remaining in (3, 2, 1):
+            say(f"        … {remaining}")
+            time.sleep(1.0)
         helper.terminate()
         time.sleep(1.2)
-        say("        现在请试着敲几个字。")
-        answer = ask("杀掉进程后键盘是否立即恢复？")
+        say("        已杀掉。现在请敲几个字。")
+        answer = ask("键盘是否已恢复（能正常打字）？")
         record("1.4", "通过" if answer.startswith("y") else "失败",
                "钩子随进程死亡被摘除，输入恢复" if answer.startswith("y")
                else "进程死后输入仍被封锁（严重）")
