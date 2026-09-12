@@ -8,8 +8,9 @@
 | `storage_limit_bytes` | 1 GiB | DEC-017 / DEC-038（字节上限 + 最旧优先） |
 | `daemon_log_limit_bytes` | 10 MiB | DEC-038 |
 | `lock_wait_seconds` | 10 | DEC-022 |
-| `overlay_arm_ms` | 1500 | DEC-030 |
-| `overlay_hold_seconds` | 5 | DEC-030（写序列保持阈值，Q-020 待实测调整） |
+| `overlay_arm_ms` | 500 | DEC-045（原 1500，缩短后仍够「让手离开」） |
+| `overlay_hold_seconds` | 30 | DEC-045（兜底阈值；正常由 `--continue` 决定） |
+| `overlay_exit_hold_ms` | 500 | DEC-045（退出保留期，避免与用户的物理动作撞上） |
 | `mouse_step_ms` / `mouse_max_points` | 10 / 30 | DEC-008（Q-015 待实测调整） |
 | `daemon_idle_exit_seconds` | 600 | DEC-035 |
 | `image_format` | png | DEC-016 |
@@ -65,8 +66,12 @@ class Config:
     storage_limit_bytes: int = 1 * 1024**3
     daemon_log_limit_bytes: int = 10 * 1024**2
     lock_wait_seconds: int = 10
-    overlay_arm_ms: int = 1500
-    overlay_hold_seconds: int = 5
+    overlay_arm_ms: int = 500
+    #: 兜底保持阈值。**正常情况下不用它** —— 调用方用 `--continue` 显式续期（DEC-045），
+    #: 这里只在「调用方崩了/忘了说结束」时把封锁兜住。
+    overlay_hold_seconds: int = 30
+    #: 退出保留期：覆盖层撤下后，输入再扣住这么久才放行。
+    overlay_exit_hold_ms: int = 500
     daemon_idle_exit_seconds: int = 600
 
     image_format: str = "png"                # png | webp
@@ -126,6 +131,7 @@ class Config:
         need(self.lock_wait_seconds >= 0, "lock_wait_seconds 不能为负")
         need(self.overlay_arm_ms >= 0, "overlay_arm_ms 不能为负")
         need(self.overlay_hold_seconds >= 0, "overlay_hold_seconds 不能为负")
+        need(self.overlay_exit_hold_ms >= 0, "overlay_exit_hold_ms 不能为负")
         need(self.daemon_idle_exit_seconds > 0, "daemon_idle_exit_seconds 必须为正")
         need(self.image_format in ("png", "webp"), f"image_format 只能是 png/webp，实际 {self.image_format}")
         need(self.mouse_step_ms > 0, "mouse_step_ms 必须为正")
@@ -202,6 +208,7 @@ SETTABLE_KEYS: dict[str, str] = {
     "lock_wait_seconds": "int",
     "overlay_arm_ms": "int",
     "overlay_hold_seconds": "int",
+    "overlay_exit_hold_ms": "int",
     "daemon_idle_exit_seconds": "int",
     "image_format": "str",
     "mouse_step_ms": "int",

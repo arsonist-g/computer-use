@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _bootstrap import add_src_to_path, utf8_console  # noqa: E402
+from _bootstrap import add_src_to_path, local_pipe, utf8_console  # noqa: E402
 
 utf8_console()
 CORE = add_src_to_path()
@@ -132,7 +132,7 @@ def main() -> int:
     hwnd_str = f"0x{int(hwnd):08X}"
 
     # ---- 2. 检测器侧（走产品完整链路）----
-    pipe = chr(92) * 2 + ".\\pipe\\cu-uia-compare"
+    pipe = local_pipe()
     env = {**os.environ, "COMPUTER_USE_PIPE": pipe, "PYTHONIOENCODING": "utf-8"}
 
     def cu(*a, timeout=1200.0):

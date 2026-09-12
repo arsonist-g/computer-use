@@ -116,6 +116,21 @@ Coordinates are absolute screen coordinates. `--hwnd` is optional and does not c
 
 For `scroll`, a positive `dy` scrolls up. That is the opposite of what many APIs do, so check the sign when direction matters.
 
+### Tell the tool when you are continuing
+
+Between two write commands the tool keeps the screen marked and the physical keyboard and mouse blocked, so the person watching knows you are still working. It decides how long to keep that up by watching the clock, and the clock is a guess: it does not know whether your next command is coming in a second or in thirty.
+
+You know. Say so:
+
+```
+computer-use click 400 300 --session s-... --continue --describe "focus the address bar"
+computer-use type "https://example.com" --session s-... --end --describe "navigate"
+```
+
+`--continue` means another command is coming. `--end` means that was the last one. Neither is required, and if you omit both the tool waits a while and then stops on its own.
+
+Use `--continue` when you are mid-task. Without it, a pause longer than the built-in window makes the tool block the keyboard and mouse again before your next command, which the person watching feels as their input being cut off repeatedly.
+
 `type` handles non-ASCII text through the Unicode input path, so typing Chinese does not require a clipboard round trip.
 
 ### Writes do not retry, and you must not either

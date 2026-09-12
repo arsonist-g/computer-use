@@ -85,6 +85,14 @@ def _common_options() -> argparse.ArgumentParser:
                         help="截图 / 结构化数据内联返回 base64，而不是只给路径")
     common.add_argument("--verbose", action="store_true", default=argparse.SUPPRESS,
                         help="追加低层细节")
+    #: 写序列的显式续期 / 结束（DEC-045）。默认「不续期」—— 阈值仍是兜底，
+    #: 但连续操作时带上 `--continue` 就不会重复走前摇、也不会中断输入封锁。
+    common.add_argument("--continue", action="store_true", dest="keep_alive",
+                        default=argparse.SUPPRESS,
+                        help="我还要接着操作：保持覆盖层与输入封锁，不重新武装")
+    common.add_argument("--end", action="store_true", dest="end_sequence",
+                        default=argparse.SUPPRESS,
+                        help="这是本次操作序列的最后一条：立即开始退场")
     return common
 
 
@@ -226,7 +234,11 @@ def to_request(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         return "omni.parse", {"hwnd": args.hwnd, "image": args.image, "ai": args.ai,
                               "session_id": session_id, "inline": args.inline}
     if command in ("click", "move", "drag", "scroll", "type", "key"):
-        params: dict[str, Any] = {"session_id": session_id, "describe": args.describe}
+        params: dict[str, Any] = {
+            "session_id": session_id, "describe": args.describe,
+            "continue": bool(getattr(args, "keep_alive", False)),
+            "end": bool(getattr(args, "end_sequence", False)),
+        }
         if command == "click":
             params.update({"x": args.x, "y": args.y, "button": args.button, "count": args.count})
         elif command == "move":
@@ -463,7 +475,7 @@ def _resolve_common(args: argparse.Namespace) -> argparse.Namespace:
     见 `_common_options` 的注释：共用项用 `SUPPRESS`，所以「用户没写」意味着
     属性不存在。这里统一补齐，让后面的渲染逻辑不必关心它是在哪一侧给的。
     """
-    for flag in ("as_json", "inline", "verbose"):
+    for flag in ("as_json", "inline", "verbose", "keep_alive", "end_sequence"):
         setattr(args, flag, bool(getattr(args, flag, False)))
     if getattr(args, "session", None) is None:
         args.session = None

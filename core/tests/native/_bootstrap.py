@@ -26,3 +26,17 @@ def add_src_to_path() -> Path:
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
     return core
+
+
+#: 默认管道名。**逐字符构造而不是写字符串字面量**：这个值里有连续反斜杠，
+#: 写在测试脚本里会被 shell / heredoc / 各层转义反复吃掉 —— 本轮为此踩了两次，
+#: 每次的表现都是「err=3 管道不存在」，排查成本很高。构造一次，全项目共用。
+#:
+#: 与 `cu.ipc.PIPE_NAME` 必须一致；这里刻意**不 import 它** —— 测试脚本可能在
+#: import cu 之前就要用这个值，而 import 顺序是每个脚本自己的事。
+DEFAULT_PIPE = chr(92) * 2 + ".\\pipe\\computer-use-daemon"
+
+
+def local_pipe() -> str:
+    """native 脚本用的管道名。"""
+    return DEFAULT_PIPE

@@ -129,7 +129,9 @@
 | 7.4c | **OCR 文本质量** | 同上 | easyocr 噪声明显：`lomnilworkerpy +2 ~0` 实为 `omni/worker.py`；但也有准确的（`Computer-Use`） | ⚠️ 偏噪，见 Q-016 |
 | 7.4d | 端到端链路 | `core/tests/native/omni_e2e.py` | CLI→daemon→bridge→worker→OmniParser 全通，4/4 | ✅ 已验 |
 | 7.5 | 结构化数据不裁剪 | 读产出的 md | 元素全量在，未被截断 | |
-| 7.6 | `--ai` 优化 | 配好端点后 `parse --ai` | 描述被修正，且 bbox 未被改动 | |
+| 7.6 | `--ai` 优化 | **2026-09-12 实测（`core/tests/native/ai_optimize.py`）**：链路本身跑通了（CLI→daemon→worker→端点），但**端点不可达** —— 见 7.6b。原始结构化数据完好保留，`vlm_failed` 如实报出 | 描述被修正 + bbox 冻结 | ⚠️ 端点问题，未能验证 |
+| 7.6b | 端点可达性 | `core/tests/native/vlm_probe.py` | `/models` 与 `/chat/completions` **全部**返回 `SSL: UNEXPECTED_EOF_WHILE_READING` / `HTTP 403 error code: 1010`（Cloudflare 按 TLS 指纹拒绝）| `--ai` 对该端点不可用；**与模型是否支持视觉无关**（纯文本调用同样被拒） | ❌ 端点不可达 |
+| 7.6c | 视觉能力 | 需一个可达的视觉端点 | —— | ⬜ 被 7.6b 阻塞 |
 | 7.7 | VLM 失败不破坏原始数据 | 故意配错 endpoint | `vlm_failed`，`_omni.md` 仍在 | |
 
 ---

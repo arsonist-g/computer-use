@@ -140,7 +140,7 @@ class Daemon:
                 # 写序列的保持窗口在这里推进：写操作之间隔一次 LLM 思考时，
                 # 覆盖层与输入封锁由这个 tick 决定何时退场。
                 was_visible = self.controller.overlay.visible
-                self.controller.tick()
+                self.controller.tick(self.config.overlay_exit_hold_ms)
                 if was_visible and not self.controller.overlay.visible:
                     # 退场时清掉上一轮的标记，否则下次武装会先闪一下旧位置。
                     self.controller.overlay.set_target(None)
@@ -502,8 +502,12 @@ class Daemon:
             # begin_write 只在**写序列开始时**武装；保持窗口内的后续命令直接继续，
             # 不再等 1.5s —— 否则一次 20 步的任务要多等 30 秒（DEC-030）。
             with self._write_lock:
-                self.controller.begin_write(self.config.overlay_arm_ms,
-                                            self.config.overlay_hold_seconds)
+                self.controller.begin_write(
+                    self.config.overlay_arm_ms, self.config.overlay_hold_seconds,
+                    keep_alive=bool(params.get("continue")),
+                )
+                if params.get("end"):
+                    self.controller.end_sequence()
             self.controller.wait_for_arm(self.config.overlay_arm_ms)
 
             result = action()

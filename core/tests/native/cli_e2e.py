@@ -20,13 +20,14 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _bootstrap import add_src_to_path, utf8_console  # noqa: E402
+from _bootstrap import add_src_to_path, local_pipe, utf8_console  # noqa: E402
 
 utf8_console()
 CORE = add_src_to_path()
 
 #: 独立管道：默认名留给用户真实的 daemon，测试不该去动它。
-PIPE = chr(92) * 2 + ".\\pipe\\cu-e2e-cli"
+# 用项目自己的常量，避免手写反斜杠被 shell/heredoc 吃掉（踩过两次）。
+PIPE = local_pipe()
 RESULTS: list[tuple[str, str, str]] = []
 
 

@@ -36,8 +36,11 @@ CONTRACT_DEFAULTS = {
     "storage_limit_bytes": 1 * 1024**3,  # 1 GiB = 1073741824
     "daemon_log_limit_bytes": 10 * 1024**2,  # 10 MiB = 10485760
     "lock_wait_seconds": 10,
-    "overlay_arm_ms": 1500,
-    "overlay_hold_seconds": 5,
+    # DEC-045：前摇 1500→500（缩短后仍够「让手离开」），
+    # 阈值 5→30 且退为兜底（正常由 `--continue` 决定）。
+    "overlay_arm_ms": 500,
+    "overlay_hold_seconds": 30,
+    "overlay_exit_hold_ms": 500,
     "daemon_idle_exit_seconds": 600,
     "image_format": "png",
     "mouse_step_ms": 10,
@@ -51,6 +54,7 @@ CONTRACT_SETTABLE_KEYS = {
     "lock_wait_seconds",
     "overlay_arm_ms",
     "overlay_hold_seconds",
+    "overlay_exit_hold_ms",
     "daemon_idle_exit_seconds",
     "image_format",
     "mouse_step_ms",
@@ -403,9 +407,10 @@ def test_load_rejects_non_object_root(tmp_path: Path) -> None:
 
 
 def test_settable_keys_whitelist_is_exact() -> None:
-    # oracle: specified —— 领域规则：15 项白名单（含 3 vlm.* / 3 omni.*）。
+    # oracle: specified —— 领域规则：白名单（含 3 vlm.* / 3 omni.*）。
+    # 16 项是 DEC-045 之后的数量（新增 overlay_exit_hold_ms）。
     assert set(SETTABLE_KEYS) == CONTRACT_SETTABLE_KEYS
-    assert len(SETTABLE_KEYS) == 15
+    assert len(SETTABLE_KEYS) == 16
 
 
 def test_settable_keys_excludes_data_dir() -> None:
