@@ -30,6 +30,11 @@ target-version = "py312"
 select = ["E4", "E7", "E9", "F", "W", "I", "B", "UP", "BLE"]
 ignore = ["E501"]
 
+
+[tool.ruff.lint.isort]
+# `_daemon_shell` 是单测共用的替身模块，和产品包一样属于「我们自己的代码」——
+# 声明成 first-party，isort 才会把它们排在同一组，而不是把测试替身塞进第三方段。
+known-first-party = ["cu", "_daemon_shell"]
 [tool.ruff.lint.per-file-ignores]
 # 真机测试要「把任何异常都记成一条失败并继续跑」，刻意捕获宽异常。
 # 逐个加 noqa 只会让那 5 行更难读，而豁免范围限定在这两个文件里。

@@ -573,8 +573,11 @@ class _TextRenderer:
 class ControlOverlay:
     """覆盖层。**必须与 daemon 同生命周期**（崩溃即安全，架构 §1.5 第 5 条）。"""
 
-    def __init__(self, on_abort=None) -> None:
+    def __init__(self, on_abort=None, on_error=None) -> None:
         self.on_abort = on_abort
+        #: 渲染失败的落点（注入）。daemon 会把它接到 daemon 日志上 —— 这个进程通常是
+        #: detached 的，stderr 是 DEVNULL，`_note_error` 那行 stderr 等于没打（Q-022）。
+        self.on_error = on_error
         self._glow = _LayeredSurface("Computer-Use Overlay Glow")
         self._pill = _LayeredSurface("Computer-Use Overlay Pill")
         self._target = _LayeredSurface("Computer-Use Overlay Target")
@@ -713,16 +716,21 @@ class ControlOverlay:
             self._note_error(exc)
 
     def _note_error(self, exc: BaseException) -> None:
-        """记下渲染失败，并在**首次**出现时打到 stderr。
+        """记下渲染失败：**首次**出现时打 stderr，并通知注入的落点（若装了）。
 
         不静默、也不因为一次失败就停掉渲染：瞬时的表面重建失败下一帧可能就好了。
         但「一直失败」必须留下痕迹，否则症状就是「屏幕上看不见，代码上看不出问题」。
+
+        两条通道是刻意的：stderr 给前台手工调试（`python -m cu.daemon`），
+        `on_error` 给 detached 的 daemon（那里 stderr 是 DEVNULL）。
         """
         self._last_error = exc
         if not self._error_logged:
             self._error_logged = True
-            print(f"[overlay] 渲染失败：{type(exc).__name__}: {exc}",
-                  file=sys.stderr, flush=True)
+            message = f"覆盖层渲染失败：{type(exc).__name__}: {exc}"
+            print(f"[overlay] {message}", file=sys.stderr, flush=True)
+            if self.on_error is not None:
+                self.on_error(message)
 
     def _hide_all(self) -> None:
         """全部撤下。**不清内容缓存** —— 缓存按内容+屏幕签名索引，重新显示时

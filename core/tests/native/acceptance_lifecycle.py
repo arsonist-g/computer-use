@@ -51,14 +51,15 @@ def cu(*args: str, timeout: float = 90.0,
 
 
 def cu_json(*args: str, timeout: float = 90.0) -> dict:
-    # `--json` 必须在**顶层子命令之前**：嵌套子命令（session list / lock unlock /
-    # daemon status …）没有挂 common 父解析器，放在后面会 unrecognized arguments。
-    _code, out, _err = cu("--json", *args, timeout=timeout)
+    # `--json` 写在**最后**（子命令之后）—— 这正是契约 §1.5 的示例写法，
+    # 也让本脚本顺带成为 F11 的回归守卫：嵌套子命令挂上 common 父解析器之前，
+    # 这个写法在 `session list` / `lock status` / `daemon status` 上一律
+    # `unrecognized arguments`（退出码 2）。
+    _code, out, _err = cu(*args, "--json", timeout=timeout)
     try:
         return json.loads(out)
     except json.JSONDecodeError:
         return {}
-
 
 def begin(hint: str) -> tuple[str, Path]:
     _code, out, _err = cu("begin", "--agent-hint", hint)
@@ -161,29 +162,32 @@ def check_5_1_and_5_2() -> None:
            f"exit={code3} · ops.md 含锚行与 reason={logged}"
            + ("" if code3 == 0 else f" · {err3.splitlines()[:1]}"))
 
-    # 反证（发现）：不带会话身份时，这次强夺**在任何地方都不留痕**。
-    # 契约（api-contract.md §1）写着「强夺写锁（需显式调用，记入操作日志）」，
-    # 而 `_lock_force_unlock` 只在拿到 session_id 时才记 —— 没有会话就没有落点，
-    # 也没有别的日志文件可兜底（`config.daemon_log` 至今没有任何写入者）。
+    # 5.2b 无会话身份的强夺 —— 这是**主路径**：契约里 `lock.forceUnlock` 的参数
+    # 只有 `{reason}`，按契约调用时必然没有 session_id。所以它必须落进 daemon 日志，
+    # 否则「记入操作日志」（api-contract.md §1）这条承诺在最常见的形态下 100% 落空。
+    # sessions/ 下**仍然不该有**落点 —— 没有会话身份，就没有那条会话的 ops.md 可写。
     lonely = "验收-5.2b-无会话身份的一次强夺"
     code4, _out4, err4 = cu("lock", "unlock", "--force", "--reason", lonely)
-    found = _reason_written_anywhere(lonely, data_root=holder_dir.parent.parent)
-    record("5.2b", "通过" if (code4 == 0 and not found) else "失败",
-           f"不带会话身份 exit={code4}（应 0）· 该 reason 在 sessions/ 与 logs/ 下"
-           f"任何文件里出现={found}（期望 False —— 即确实没有落点）"
+    data_root = holder_dir.parent.parent
+    in_log = _reason_in_daemon_log(lonely, data_root)
+    in_sessions = _reason_written_anywhere(lonely, data_root, roots=("sessions",))
+    record("5.2b", "通过" if (code4 == 0 and in_log and not in_sessions) else "失败",
+           f"不带会话身份 exit={code4}（应 0）· 该 reason 在 logs/daemon.log 里={in_log}"
+           f"（应 True）· 在 sessions/ 下={in_sessions}（应 False —— 没有会话身份就没有 ops.md）"
            + ("" if code4 == 0 else f" · {err4.splitlines()[:1]}"))
 
     cu("session", "end", "--session", waiter)
 
 
-def _reason_written_anywhere(needle: str, data_root: Path) -> bool:
-    """这个字符串被写进 sessions/ 或 logs/ 里的任何文件了吗。
+def _reason_written_anywhere(needle: str, data_root: Path,
+                             roots: tuple[str, ...] = ("sessions", "logs")) -> bool:
+    """这个字符串被写进 data_root 下那几个子目录的任何文本文件里了吗。
 
     **只扫文本工件**：data_root 下还有 `venv-omni/` 与 `models/`（几万个文件、
     上百 MB 二进制），对它们做 `rglob` + 全文解码会把这一步拖成几分钟。
     """
-    roots = [data_root / "sessions", data_root / "logs"]
-    for root in roots:
+    for name in roots:
+        root = data_root / name
         if not root.exists():
             continue
         for path in root.rglob("*"):
@@ -195,6 +199,15 @@ def _reason_written_anywhere(needle: str, data_root: Path) -> bool:
             except OSError:
                 continue
     return False
+
+
+def _reason_in_daemon_log(needle: str, data_root: Path) -> bool:
+    """这个字符串进了 daemon 日志吗 —— §5.2b 的判据（Q-023）。"""
+    log = data_root / "logs" / "daemon.log"
+    try:
+        return log.is_file() and needle in log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -456,25 +469,36 @@ def check_5_9() -> None:
 
 
 def report_findings() -> None:
-    """验收过程中撞见的、**不属于任何一条验收项**的问题。只记录事实，不给结论。"""
-    print("\n----- 验收过程撞见的其它问题 -----", flush=True)
+    """把当初在这套流程里撞见的几个缺口逐条复验一遍。
 
-    # F1：INTERNAL_ERROR 的 hint 让人「看 daemon 日志」，但没有 daemon 日志。
+    它们**不属于任何一条验收项**（是 2026-09-13 全量验收时顺带抓出来的），
+    所以单独列在这里：每条都给一个「通过 / 失败」的判据，而不是只打印事实。
+    """
+    print("\n----- 当初撞见的缺口，逐条复验 -----", flush=True)
+
+    # F1 / Q-022：INTERNAL_ERROR 的 hint 让人「详见 daemon 日志」——
+    # 那个文件以前从未被创建过；现在 daemon 起停就会写它。
     data_root = Path.home() / ".computer-use"
     log = data_root / "logs" / "daemon.log"
-    print(f"  [F1] daemon 日志文件 {log} 存在={log.exists()} · logs/ 目录存在="
-          f"{(data_root / 'logs').exists()} · "
-          f"（INTERNAL_ERROR 的 hint 指向它；源码里没有任何写入者）", flush=True)
+    log_text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+    record("F1", "通过" if "daemon 启动" in log_text else "失败",
+           f"daemon 日志 {log} 存在={log.is_file()}（hint 承诺的那个文件）· "
+           f"含启动记录={'daemon 启动' in log_text}")
 
-    # F2：`lock unlock --force` 在无会话身份时不留痕 —— 见 §5.2b。
+    # F4 / Q-023：无会话身份的强夺必须留痕 —— 判据在 §5.2b 里（要真的夺一次锁）。
+    print("  [F4] 无会话身份的强夺是否留痕 → 见 §5.2b 的实测", flush=True)
 
-    # F3：嵌套子命令没挂 common 父解析器，选项写在子命令之后会 unrecognized。
-    a_code, _a_out, a_err = cu("daemon", "status", "--json")
-    b_code, _b_out, _b_err = cu("--json", "daemon", "status")
-    c_code, _c_out, c_err = cu("config", "show", "--json")
-    print(f"  [F3] `daemon status --json` exit={a_code}（应 0）· "
-          f"`--json daemon status` exit={b_code} · `config show --json` exit={c_code} · "
-          f"报错示例：{(a_err or c_err).splitlines()[:1]}", flush=True)
+    # F11：嵌套子命令没挂 common 父解析器，选项写在子命令之后会 unrecognized。
+    # 契约 §1.5 的示例写法正是「选项跟在子命令之后」，所以这四条现在都该是 0。
+    nested = [("daemon", "status", "--json"), ("config", "show", "--json"),
+              ("session", "list", "--json"), ("lock", "status", "--json"),
+              ("session", "end", "--session", "s-nonexistent-probe", "--json")]
+    codes = {"/".join(item): cu(*item)[0] for item in nested}
+    after_ok = all(code in (0, 3) for code in codes.values())        # 3 = 会话不存在，也算「认了参数」
+    before_code = cu("--json", "daemon", "status")[0]                # 旧写法仍要能走
+    record("F11", "通过" if after_ok and before_code == 0 else "失败",
+           f"选项写在子命令之后：{codes}（应无 2 —— 2 就是 unrecognized arguments）· "
+           f"写在最前面仍是 exit={before_code}")
 
 
 def cleanup_sessions() -> int:

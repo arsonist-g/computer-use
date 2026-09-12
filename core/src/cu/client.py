@@ -113,11 +113,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     session = add("session", "会话查询与结束")
     session_sub = session.add_subparsers(dest="session_command", metavar="<list|info|end>")
-    session_sub.add_parser("list", help="会话列表，按创建时间倒序")
-    info = session_sub.add_parser("info", help="会话元数据")
-    info.add_argument("--session", dest="session_override", default=None)
-    end = session_sub.add_parser("end", help="结束会话：释放锁 + 配额清理")
-    end.add_argument("--session", dest="session_override", default=None)
+    # 嵌套子命令也挂 common 父解析器。argparse 的选项只能写在它**所属的那一级**
+    # 之前，而契约 §1.5 的示例写法正是「选项跟在子命令之后」—— 不挂就认不出
+    # `session list --json`（实测 unrecognized arguments，退出码 2）。
+    # `session info` / `session end` 曾经各自加过一个 `--session`（dest 覆盖），
+    # 现在统一回 common 这一份，不在同一个选项上留两套定义。
+    session_sub.add_parser("list", help="会话列表，按创建时间倒序", parents=[common])
+    session_sub.add_parser("info", help="会话元数据", parents=[common])
+    session_sub.add_parser("end", help="结束会话：释放锁 + 配额清理", parents=[common])
 
     # ---- 只读 ----
     windows = add("windows", "窗口列表，按 z-order 从上到下")
@@ -172,28 +175,30 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- 锁 / 配置 / daemon ----
     lock = add("lock", "写锁")
     lock_sub = lock.add_subparsers(dest="lock_command", metavar="<status|unlock>")
-    lock_sub.add_parser("status", help="锁持有者 / 持有时长 / 空闲状态")
-    force = lock_sub.add_parser("unlock", help="强夺写锁（记入操作日志）")
+    lock_sub.add_parser("status", help="锁持有者 / 持有时长 / 空闲状态", parents=[common])
+    force = lock_sub.add_parser("unlock", help="强夺写锁（记入操作日志）", parents=[common])
     force.add_argument("--force", action="store_true", help="必须显式给出才算数")
     force.add_argument("--reason", default=None, help="强夺原因（必填，会写进日志）")
 
     config = add("config", "配置")
     config_sub = config.add_subparsers(dest="config_command", metavar="<show|set>")
-    config_sub.add_parser("show", help="显示全部配置项")
-    setter = config_sub.add_parser("set", help="修改单项配置")
+    config_sub.add_parser("show", help="显示全部配置项", parents=[common])
+    setter = config_sub.add_parser("set", help="修改单项配置", parents=[common])
     setter.add_argument("key")
     setter.add_argument("value")
 
     setup = add("setup", "安装可选组件")
     setup_sub = setup.add_subparsers(dest="setup_target", metavar="<omni>")
-    omni_cmd = setup_sub.add_parser("omni", help="装配 OmniParser 环境（约 1.4GB 权重）")
+    omni_cmd = setup_sub.add_parser("omni", help="装配 OmniParser 环境（约 1.4GB 权重）",
+                                    parents=[common])
     omni_cmd.add_argument("--force", action="store_true", help="重装依赖")
     omni_cmd.add_argument("--skip-weights", action="store_true", help="不下权重")
 
     daemon = add("daemon", "daemon")
     daemon_sub = daemon.add_subparsers(dest="daemon_command", metavar="<status|stop>")
-    daemon_sub.add_parser("status", help="PID / 启动时间 / 管道名 / 活跃会话 / 占用")
-    daemon_sub.add_parser("stop", help="停止常驻进程（调试用）")
+    daemon_sub.add_parser("status", help="PID / 启动时间 / 管道名 / 活跃会话 / 占用",
+                          parents=[common])
+    daemon_sub.add_parser("stop", help="停止常驻进程（调试用）", parents=[common])
 
     return parser
 
@@ -218,7 +223,7 @@ def to_request(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         if sub == "info":
             return "session.list", {}          # 客户端侧筛出一条，避免多一个方法
         if sub == "end":
-            return "session.end", {"session_id": args.session_override or session_id}
+            return "session.end", {"session_id": session_id}
         raise CUError(ErrorCode.INVALID_PARAMS, "session 需要一个子命令：list / info / end")
     if command == "windows":
         return "desktop.windows", {"all": args.all, "verbose": verbose}
@@ -501,7 +506,7 @@ def run(argv: list[str] | None = None) -> int:
             result = client.call(make_request("session.list"))
         finally:
             client.close()
-        wanted = args.session_override or args.session or os.environ.get(ENV_SESSION)
+        wanted = args.session or os.environ.get(ENV_SESSION)
         found = next((row for row in result.get("sessions", [])
                       if row["session_id"] == wanted), None)
         result = {"_sub": "info", "session": found}
@@ -539,22 +544,64 @@ def main(argv: list[str] | None = None) -> int:
         args = _resolve_common(parser.parse_args(argv))
         return run(argv)
     except CUError as exc:
-        as_json = bool(getattr(args, "as_json", False))
-        print(render_error_json(exc) if as_json else exc.render(), file=sys.stderr)
+        _emit_error(exc, _wants_json(argv, args))
         return int(exc.exit_code.value)
     except AppError as exc:
         cu = exc.as_cu_error()
-        as_json = bool(getattr(args, "as_json", False))
-        print(render_error_json(cu) if as_json else cu.render(), file=sys.stderr)
+        _emit_error(cu, _wants_json(argv, args))
         return int(cu.exit_code.value)
     except KeyboardInterrupt:
-        print("已中断", file=sys.stderr)
+        # 用户中止也是「这次调用失败了」：`--json` 下 stdout 不能是空的 ——
+        # 否则只读 stdout 的集成方看到的是「成功，但什么都没输出」。
+        if _wants_json(argv, args):
+            _emit_error(CUError(ErrorCode.ABORTED_BY_USER, "已中断"), True)
+        else:
+            print("已中断", file=sys.stderr)
         return int(EXIT_CODES[ErrorCode.ABORTED_BY_USER].value)
     except Exception as exc:  # noqa: BLE001 —— 顶层边界：任何异常都要变成可读错误 + 退出码
-        cu = CUError(ErrorCode.INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
-        as_json = bool(getattr(args, "as_json", False))
-        print(render_error_json(cu) if as_json else cu.render(), file=sys.stderr)
+        cu = CUError(ErrorCode.INTERNAL_ERROR, f"{type(exc).__name__}: {exc}",
+                     _daemon_log_detail())
+        _emit_error(cu, _wants_json(argv, args))
         return int(EXIT_CODES[ErrorCode.INTERNAL_ERROR].value)
+
+
+def _wants_json(argv: list[str] | None, args: argparse.Namespace | None) -> bool:
+    """这次调用要不要 JSON 输出。
+
+    `args` 为 None 说明 argparse 已经失败（`_Parser.error` 把参数错误抛成了 CUError），
+    命名空间拿不到了 —— 但 `--json` 的意图必须保住：否则「`--json` + 参数写错」又退回
+    stderr 上的人读文本，正是 Q-025 要堵的那条缝。所以退一步扫一遍 argv。
+    """
+    if args is not None:
+        return bool(getattr(args, "as_json", False))
+    return "--json" in (sys.argv[1:] if argv is None else argv)
+
+
+def _emit_error(exc: CUError, as_json: bool) -> None:
+    """错误输出的**流**跟着 `--json` 走，不跟着「成功还是失败」走（Q-025）。
+
+    契约只在 §5 画了「stdout + exit code」，没说错误信封走哪条流；实测的行为是
+    「成功走 stdout、错误走 stderr」，于是只读 stdout 的集成方会**静默**漏掉全部错误
+    （验收 §7.7 实测：退出码 5、stdout 0 字符、stderr 432 字符）。
+
+    自 2026-09-13 起：`--json` ⟹ 错误信封也走 stdout，与成功同一条流。
+    没有 `--json` 时人读错误仍走 stderr（Unix 惯例不变）。
+    """
+    stream = sys.stdout if as_json else sys.stderr
+    print(render_error_json(exc) if as_json else exc.render(), file=stream)
+
+
+def _daemon_log_detail() -> dict[str, Any]:
+    """`internal_error` 的 hint 承诺「路径见 detail.log」，这里把那个承诺兑现。
+
+    取不到（配置文件读不了）就返回空字典 —— 错误路径上的兜底不能再抛错。
+    """
+    try:
+        from .config import Config
+
+        return {"log": str(Config.load().daemon_log)}
+    except Exception:  # noqa: BLE001 —— 见上：错误路径的兜底绝不再失败
+        return {}
 
 
 def _force_utf8_stdout() -> None:

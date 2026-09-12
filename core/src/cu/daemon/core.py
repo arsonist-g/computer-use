@@ -16,6 +16,8 @@ from __future__ import annotations
 import ctypes
 import threading
 import time
+import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,12 +26,13 @@ from typing import Any
 from .. import PROTOCOL_VERSION, __version__
 from ..config import Config, apply_set
 from ..desktop import build_desktop
-from ..desktop.base import Desktop
+from ..desktop.base import Desktop, InputResult, WindowIdentity
 from ..desktop.controller import WriteSequenceController
 from ..errors import CUError, ErrorCode
-from ..ids import now_iso, parse_hwnd
+from ..ids import format_hwnd, now_iso, parse_hwnd
 from ..ipc import PIPE_NAME, DaemonLock, IpcServer, read_lock_pid
 from ..manifest import ScreenshotRecord, StructuredRecord
+from .log import DaemonLog
 from .ops import OpsEntry
 from .sessions import Sessions
 from .writelock import WriteLock
@@ -85,11 +88,17 @@ class Daemon:
 
         self.config = config
         self.pipe_name = pipe_name
-        self.controller = WriteSequenceController()
+        # 诊断日志要在控制器之前建好：覆盖层的渲染线程要用它兜住「一直渲染失败」
+        # 这个现场 —— detached 进程的 stderr 是 DEVNULL，打到那里等于没打（Q-022）。
+        # `secrets` 登记已知密钥：整行落盘之前会被抹掉（硬约束：绝不写 api_key）。
+        self.log = DaemonLog(config.daemon_log, config.daemon_log_limit_bytes,
+                             secrets=[config.vlm.api_key])
+        self.controller = WriteSequenceController(on_error=self._log_component_error)
         self.desktop: Desktop = desktop or build_desktop(config, self.controller)
         self.sessions = Sessions(config.sessions_dir, storage_limit_bytes=config.storage_limit_bytes)
         self.lock = WriteLock()
         self.started_at = now_iso()
+        self._booted_at = time.monotonic()
         self.omni_refcount = 0
         #: 写序列的锁：写路径与空闲清理都会碰覆盖层，必须串行。
         self._write_lock = threading.Lock()
@@ -121,12 +130,28 @@ class Daemon:
         self._daemon_lock = lock
 
     def prepare(self) -> dict[str, Any]:
-        """启动前的准备工作，返回一份摘要供日志使用。"""
-        self.acquire_singleton()
+        """启动前的准备工作，返回一份摘要供启动器使用。"""
+        try:
+            self.acquire_singleton()
+        except CUError as exc:
+            # 「第二个 daemon 起不来」不是错误（客户端会去连第一个），但它是
+            # 「daemon 明明在跑、命令却连不上」这类排查的开场白，值得留痕。
+            self.log.warning("daemon 未启动：单实例锁已被占用", detail=exc.message)
+            raise
+        self.log.info("daemon 启动", pid=os_getpid(), pipe=self.pipe_name,
+                      dpi=str(self.dpi_result))
         orphaned = self.sessions.mark_orphans()
         # 钩子与覆盖层随 daemon 一起起来 —— 它们**必须**同生命周期
         # （架构 §1.5 第 5 条：进程死亡 ⟹ OS 摘除钩子 ⟹ 用户输入立即恢复）。
-        self.controller.start()
+        try:
+            self.controller.start()
+        except CUError as exc:
+            # 钩子装不上 / 覆盖层起不来：daemon 最该留下现场的一类失败 ——
+            # 它起来之后不会再报任何东西，而症状只是「输入没被封锁」，看不出原因。
+            self.log.error("控制器启动失败（输入钩子或覆盖层）",
+                           code=exc.code.value, detail=exc.message)
+            raise
+        self.log.info("控制器就绪", orphaned=len(orphaned), overlay=self.controller.state)
         return {"orphaned": orphaned, "overlay": self.controller.state}
 
     def serve_forever(self) -> None:
@@ -159,14 +184,16 @@ class Daemon:
         self._stop.set()
         try:
             self.controller.shutdown()
-        except Exception:  # noqa: BLE001 —— 清理路径不该因覆盖层故障而中断
-            pass
+        except Exception as exc:  # noqa: BLE001 —— 清理路径不该因覆盖层故障而中断
+            self.log.error("控制器关闭异常", detail=f"{type(exc).__name__}: {exc}")
         if self._server is not None:
             self._server.stop()
             self._server = None
         if self._daemon_lock is not None:
             self._daemon_lock.release()
             self._daemon_lock = None
+        self.log.info("daemon 退出", uptime_s=round(time.monotonic() - self._booted_at, 1),
+                      idle_for_s=round(self.idle_for(), 1))
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -201,6 +228,16 @@ class Daemon:
         """
         return self.controller.overlay.visible or self.controller.blocker.blocking
 
+    def _log_component_error(self, message: str) -> None:
+        """桌面层组件（覆盖层的渲染线程）报上来的失败。
+
+        覆盖层原来只把渲染失败打一行到 stderr —— 而 detached 的 daemon 上 stderr 是
+        DEVNULL，于是症状只剩「屏幕上看不见」，代码上看不出任何问题。
+        这是接入点里唯一一个**不在本类主动调用链上**的：它从渲染线程回调进来，
+        所以走 `on_error` 注入，而不是让桌面层反向依赖 daemon。
+        """
+        self.log.error(message)
+
     # ------------------------------------------------------------------
     # 路由
     # ------------------------------------------------------------------
@@ -212,7 +249,23 @@ class Daemon:
         if handler is None:
             raise CUError(ErrorCode.INVALID_PARAMS, f"未知方法：{method}", {"method": method})
         self.touch()
-        return handler(params)
+        try:
+            return handler(params)
+        except CUError:
+            # 预期内的错误：调用方拿到的是错误码与建议动作，它不是「现场」——
+            # 记进去只会把真出事的那些行冲掉。
+            raise
+        except Exception as exc:  # noqa: BLE001 —— 边界：这里就是「未捕获」的落点
+            # daemon 是 detached 进程，这个异常若不留痕，出过什么事就永远查不到。
+            self.log.error("未捕获异常", method=method,
+                           detail=f"{type(exc).__name__}: {exc}",
+                           traceback=traceback.format_exc())
+            raise CUError(
+                ErrorCode.INTERNAL_ERROR,
+                f"{type(exc).__name__}: {exc}",
+                # hint 承诺「路径见错误详情」，这里把那个承诺兑现。
+                {"method": method, "log": str(self.log.path)},
+            ) from exc
 
     def _routes(self) -> dict[str, Any]:
         return {
@@ -327,41 +380,48 @@ class Daemon:
         return payload
 
     # ---- input（写命令：取锁 + describe 必填）----
+    #
+    # 每个 action 都收一个 `expect`：这次写操作要比对的「期望身份」。它由 `_write`
+    # 统一解析 —— 只有 daemon 持有 `Sessions`，那张 pid/class 的底稿在会话记录里。
 
     def _input_click(self, params: dict) -> dict:
-        return self._write(params, "click", lambda: self.desktop.click(
+        return self._write(params, "click", lambda expect: self.desktop.click(
             int(params["x"]), int(params["y"]),
             button=params.get("button", "left"), count=int(params.get("count", 1)),
-            hwnd=self._optional_hwnd(params),
+            hwnd=self._optional_hwnd(params), expect=expect,
         ))
 
     def _input_move(self, params: dict) -> dict:
-        return self._write(params, "move", lambda: self.desktop.move(
+        return self._write(params, "move", lambda expect: self.desktop.move(
             int(params["x"]), int(params["y"]), hwnd=self._optional_hwnd(params),
+            expect=expect,
         ))
 
     def _input_drag(self, params: dict) -> dict:
-        return self._write(params, "drag", lambda: self.desktop.drag(
+        return self._write(params, "drag", lambda expect: self.desktop.drag(
             int(params["x1"]), int(params["y1"]), int(params["x2"]), int(params["y2"]),
             button=params.get("button", "left"), hwnd=self._optional_hwnd(params),
+            expect=expect,
         ))
 
     def _input_scroll(self, params: dict) -> dict:
         at = params.get("at")
         point = (int(at[0]), int(at[1])) if isinstance(at, (list, tuple)) and len(at) == 2 else None
-        return self._write(params, "scroll", lambda: self.desktop.scroll(
+        # 滚动没有 hwnd（契约只有 `--at`），所以没有可比对的身份：收下 expect，
+        # 但不用它 —— `_write` 对每条写命令都是同一条通路，逐条分叉更糟。
+        return self._write(params, "scroll", lambda _expect: self.desktop.scroll(
             int(params["dx"]), int(params["dy"]), at=point,
         ))
 
     def _input_type(self, params: dict) -> dict:
-        return self._write(params, "type", lambda: self.desktop.type_text(
-            str(params["text"]), hwnd=self._optional_hwnd(params),
+        return self._write(params, "type", lambda expect: self.desktop.type_text(
+            str(params["text"]), hwnd=self._optional_hwnd(params), expect=expect,
         ))
 
     def _input_key(self, params: dict) -> dict:
-        return self._write(params, "key", lambda: self.desktop.key(
+        return self._write(params, "key", lambda expect: self.desktop.key(
             str(params["combo"]), hwnd=self._optional_hwnd(params),
-            force=bool(params.get("force")),
+            force=bool(params.get("force")), expect=expect,
         ))
 
     # ---- omni ----
@@ -401,16 +461,35 @@ class Daemon:
         if not reason:
             raise CUError(ErrorCode.INVALID_PARAMS,
                           "强行解锁必须给出 reason —— 它会记入操作日志")
-        previous = self.lock.force_unlock(reason)
         session_id = params.get("session_id")
+        previous = self.lock.force_unlock(reason)
+        # **永远**写 daemon 日志。契约里 `lock.forceUnlock` 的参数只有 `{reason}`，
+        # 所以按契约调用时**必然没有** session_id；而「只在有会话身份时才记」的写法
+        # 让这次强夺在 sessions/ 与 logs/ 下**一个文件里都搜不到**（实测 §5.2b），
+        # 而契约写着「记入操作日志」—— 主路径上那条承诺 100% 不成立。
+        self.log.warning("强夺写锁", reason=reason, released=previous is not None,
+                         previous_holder=(previous.session_id if previous else ""),
+                         session=session_id or "")
         if session_id:
+            self._record_force_unlock(session_id, reason, previous)
+        return {"released": previous is not None,
+                "previous_holder": previous.session_id if previous else None}
+
+    def _record_force_unlock(self, session_id: str, reason: str, previous) -> None:
+        """有会话身份时**额外**把这次强夺写进那条会话的 `ops.md`。
+
+        写不进去不让命令失败：锁已经放掉了，不能因为日志写不进就报「强夺失败」——
+        而且上面那行 daemon 日志已经兜住了这次强夺的记录。
+        """
+        try:
             self.sessions.record_op(session_id, OpsEntry(
                 entry_no=0, at=datetime.now().strftime("%H:%M:%S"),
                 command="unlock --force", describe=reason, result="ok",
                 detail=(f"被强夺的持有者：{previous.session_id}" if previous else "锁当时无人持有"),
             ))
-        return {"released": previous is not None,
-                "previous_holder": previous.session_id if previous else None}
+        except CUError as exc:
+            self.log.warning("强夺写锁：写会话 ops.md 失败", session=session_id,
+                             code=exc.code.value, detail=exc.message)
 
     # ---- config ----
 
@@ -425,6 +504,11 @@ class Daemon:
         updated.save()
         self.config = updated
         self.sessions.storage_limit_bytes = updated.storage_limit_bytes
+        # 日志的上限与「要抹掉的密钥」也要跟着换 —— 否则 `config set
+        # daemon_log_limit_bytes` / `vlm.api_key` 就成了定义了却不生效的项，
+        # 那正是 Q-022 的成因（配置在，没有生效的写入者）。
+        self.log.limit_bytes = updated.daemon_log_limit_bytes
+        self.log.register_secrets([updated.vlm.api_key])
         # **桌面层也要换**：它持有的是构造时那一份 Config，只换 daemon 自己那份的话，
         # 桌面层读到的仍是旧值。实测踩到过：`config set vlm.base_url` 指向一个死端点后，
         # `parse --ai` 照样打到了原来的模型（跑了 101 秒并成功返回），
@@ -478,13 +562,17 @@ class Daemon:
     # 共用路径
     # ------------------------------------------------------------------
 
-    def _write(self, params: dict, label: str, action) -> dict:
-        """所有写命令的唯一通路：describe 校验 → 取锁 → 执行 → 记日志。
+    def _write(self, params: dict, label: str,
+               action: Callable[[WindowIdentity | None], InputResult]) -> dict:
+        """所有写命令的唯一通路：describe 校验 → 取锁 → 解析期望身份 → 执行 → 记日志。
 
         写命令**不做幂等、不自动重试**（DEC-041）：一次超时的 click 可能已经点下去了，
         重试就是点两下。日志 `ops.md` 记录的是「实际执行了什么」，那才是判断依据。
 
         无论成功失败都必须记一条日志 —— 失败的那次尤其重要（DEC-006）。
+
+        `expect` 在**这里**解析而不是在桌面层：那张 pid/class 的底稿在会话记录里，
+        只有 daemon 持有 `Sessions`（见 `_expected_identity`）。
         """
         describe = params.get("describe")
         if not isinstance(describe, str) or not describe.strip():
@@ -493,6 +581,7 @@ class Daemon:
 
         session_id = self._require_session_id(params)
         self.sessions.get(session_id)          # 会话不存在时在这里就失败，不去动桌面
+        expect = self._expected_identity(session_id, self._optional_hwnd(params))
         entry = OpsEntry(
             entry_no=0,
             at=datetime.now().strftime("%H:%M:%S"),
@@ -516,7 +605,7 @@ class Daemon:
                     self.controller.end_sequence()
             self.controller.wait_for_arm(self.config.overlay_arm_ms)
 
-            result = action()
+            result = action(expect)
             self.lock.heartbeat(session_id)
             entry.result = "ok" if result.ok else "error"
             entry.detail = _input_detail(result)
@@ -614,10 +703,27 @@ class Daemon:
     def _source_seq_for(self, session_id: str, hwnd: int | None) -> int | None:
         if hwnd is None:
             return None
-        from ..ids import format_hwnd
-
         record = self.sessions.last_screenshot_of(session_id, format_hwnd(hwnd))
         return record.seq if record is not None else None
+
+    def _expected_identity(self, session_id: str, hwnd: int | None) -> WindowIdentity | None:
+        """写操作前置要比对的「期望身份」（DEC-013 第 1 层的落地 / Q-024）。
+
+        数据早就在了：`windows.check_hwnd()` 的 `expect_pid` / `expect_class` 全仓
+        没有任何调用点传过，于是「hwnd 被系统复用给了别的进程」这条检查从未生效，
+        `window_stale` 这个错误码也就一直发不出来。而该窗口**最近一次截图**已经把
+        pid 与窗口类记在会话清单里了 —— 这里把它取出来当前置的比对基准。
+
+        **没有历史记录就不校验**（返回 None）：无从比对，保守放行。宁可不拦，
+        也不要因为「这个会话没截过图」拒绝一次合法点击 —— 这条挡的是
+        「hwnd 复用后点到**另一个**窗口」，不是「调用方没按标准流程先截图」。
+        """
+        if hwnd is None:
+            return None
+        record = self.sessions.last_screenshot_of(session_id, format_hwnd(hwnd))
+        if record is None or record.window is None:
+            return None
+        return WindowIdentity(pid=record.window.pid, klass=record.window.klass)
 
 
 # ---------------------------------------------------------------------------

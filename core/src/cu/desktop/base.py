@@ -16,6 +16,21 @@ from typing import Any, Protocol
 from ..errors import CUError, ErrorCode
 
 
+@dataclass(frozen=True)
+class WindowIdentity:
+    """写操作前置要比对的「这个 hwnd 应该是谁」（DEC-013 第 1 层的落地）。
+
+    由 daemon 侧从会话记录里解析出来（只有它持有 `Sessions`）：该窗口**最近一次
+    截图**记下的 pid 与窗口类，就是这次写操作要求它在场的身份。
+
+    **没有记录就不传**（`None`）：无从比对，保守放行 ——
+    见 `Daemon._expected_identity`。
+    """
+
+    pid: int | None = None
+    klass: str | None = None
+
+
 @dataclass
 class WindowInfo:
     """一次窗口枚举的观测结果（api-contract.md §1.2 的字段契约，顺序即输出顺序）。"""
@@ -138,19 +153,25 @@ class Desktop(Protocol):
     def parse(self, *, hwnd: int | None, image_path: str | None, ai: bool,
               out_dir, seq: int) -> ParseResult: ...
 
-    def click(self, x: int, y: int, *, button: str, count: int,
-              hwnd: int | None = None) -> InputResult: ...
+    # 写方法都接受一个可选的 `expect`：daemon 解析出的期望身份。桌面层**不自己
+    # 推断**它是谁 —— 那张 pid/class 的底稿在会话记录里，只有 daemon 有。
 
-    def move(self, x: int, y: int, *, hwnd: int | None = None) -> InputResult: ...
+    def click(self, x: int, y: int, *, button: str, count: int,
+              hwnd: int | None = None, expect: WindowIdentity | None = None) -> InputResult: ...
+
+    def move(self, x: int, y: int, *, hwnd: int | None = None,
+             expect: WindowIdentity | None = None) -> InputResult: ...
 
     def drag(self, x1: int, y1: int, x2: int, y2: int, *, button: str,
-             hwnd: int | None = None) -> InputResult: ...
+             hwnd: int | None = None, expect: WindowIdentity | None = None) -> InputResult: ...
 
     def scroll(self, dx: int, dy: int, *, at: tuple[int, int] | None = None) -> InputResult: ...
 
-    def type_text(self, text: str, *, hwnd: int | None = None) -> InputResult: ...
+    def type_text(self, text: str, *, hwnd: int | None = None,
+                  expect: WindowIdentity | None = None) -> InputResult: ...
 
-    def key(self, combo: str, *, hwnd: int | None = None, force: bool = False) -> InputResult: ...
+    def key(self, combo: str, *, hwnd: int | None = None, force: bool = False,
+            expect: WindowIdentity | None = None) -> InputResult: ...
 
 
 class UnavailableDesktop:

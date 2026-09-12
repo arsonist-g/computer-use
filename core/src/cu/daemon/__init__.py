@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         daemon.serve_forever()
     except CUError as exc:
+        # 走到这里 daemon 就死了。stderr 在 detached 时是 DEVNULL —— 日志是唯一现场。
+        daemon.log.error("daemon 异常退出", code=exc.code.value, detail=exc.message)
         print(f"cu-daemon: {exc.message}", file=sys.stderr)
         return 1
     return 0

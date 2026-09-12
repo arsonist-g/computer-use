@@ -15,7 +15,7 @@ from . import capture as capture_mod
 from . import input as input_mod
 from . import omni, uia
 from . import windows as windows_mod
-from .base import CaptureResult, InputResult, ParseResult, WindowInfo
+from .base import CaptureResult, InputResult, ParseResult, WindowIdentity, WindowInfo
 from .controller import WriteSequenceController
 
 #: 写操作前置的自动前台开关。DEC-013 记录了「前置是否可关闭」这一未决项 ——
@@ -121,21 +121,22 @@ class RealDesktop:
     # ---- 写 ----
 
     def click(self, x: int, y: int, *, button: str = "left", count: int = 1,
-              hwnd: int | None = None) -> InputResult:
-        self._preflight(hwnd)
+              hwnd: int | None = None, expect: WindowIdentity | None = None) -> InputResult:
+        self._preflight(hwnd, expect)
         return input_mod.click(x, y, button=button, count=count,
                                step_ms=self.config.mouse_step_ms,
                                max_points=self.config.mouse_max_points)
 
-    def move(self, x: int, y: int, *, hwnd: int | None = None) -> InputResult:
-        self._preflight(hwnd, foreground=False)
+    def move(self, x: int, y: int, *, hwnd: int | None = None,
+             expect: WindowIdentity | None = None) -> InputResult:
+        self._preflight(hwnd, expect, foreground=False)
         moved = input_mod.move_cursor(x, y, step_ms=self.config.mouse_step_ms,
                                       max_points=self.config.mouse_max_points)
         return InputResult(ok=True, moved_ms=moved, total_ms=moved)
 
     def drag(self, x1: int, y1: int, x2: int, y2: int, *, button: str = "left",
-             hwnd: int | None = None) -> InputResult:
-        self._preflight(hwnd)
+             hwnd: int | None = None, expect: WindowIdentity | None = None) -> InputResult:
+        self._preflight(hwnd, expect)
         return input_mod.drag(x1, y1, x2, y2, button=button,
                               step_ms=self.config.mouse_step_ms,
                               max_points=self.config.mouse_max_points)
@@ -143,28 +144,48 @@ class RealDesktop:
     def scroll(self, dx: int, dy: int, *, at: tuple[int, int] | None = None) -> InputResult:
         return input_mod.scroll(dx, dy, at=at)
 
-    def type_text(self, text: str, *, hwnd: int | None = None) -> InputResult:
-        self._preflight(hwnd)
+    def type_text(self, text: str, *, hwnd: int | None = None,
+                  expect: WindowIdentity | None = None) -> InputResult:
+        self._preflight(hwnd, expect)
         return input_mod.type_text(text)
 
-    def key(self, combo: str, *, hwnd: int | None = None, force: bool = False) -> InputResult:
-        self._preflight(hwnd, foreground=False)
+    def key(self, combo: str, *, hwnd: int | None = None, force: bool = False,
+            expect: WindowIdentity | None = None) -> InputResult:
+        self._preflight(hwnd, expect, foreground=False)
         return input_mod.key(combo, force=force,
                              danger_keys=frozenset(self.config.danger_keys))
 
     # ---- 前置校验（DEC-013）----
 
-    def _preflight(self, hwnd: int | None, foreground: bool = True) -> None:
+    def _preflight(self, hwnd: int | None, expect: WindowIdentity | None = None,
+                   foreground: bool = True) -> None:
         """写操作的三层前置：身份校验 → 自动前台 → （漂移检查在 daemon 侧）。
 
         没有 hwnd 时跳过 —— 契约允许「就在当前前台窗口上操作」（api-contract.md
         §1.3：`--hwnd` 用于前置校验，**不改变坐标语义**）。
+
+        `expect` 是 daemon 从会话记录里解析出来的期望身份（Q-024），**只在这里消费**：
+        比对基准必须来自「我们此前看到的那个窗口」，而不是调用方现编的参数 ——
+        否则这条检查挡不住 hwnd 复用，也就发不出 `window_stale`。
         """
         if hwnd is None:
             return
-        windows_mod.check_hwnd(hwnd)
+        expect_pid, expect_class = _expectation(expect)
+        windows_mod.check_hwnd(hwnd, expect_pid=expect_pid, expect_class=expect_class)
         if foreground and BRING_TO_FOREGROUND:
             windows_mod.bring_to_foreground(hwnd)
+
+
+def _expectation(expect: WindowIdentity | None) -> tuple[int | None, str | None]:
+    """把期望身份拆成 `check_hwnd` 的两个参数，并把空值当成「不知道」。
+
+    清单里的 `pid` / `class` 可能是 `0` / `""`（早期记录，或当时取不到窗口类）。
+    把它们当成「要求 pid == 0」会让一次合法点击被拒 —— 有记录却没法比对，
+    与没有记录等价，都应当放行（约束：`window_stale` 只在真有可比对的身份时才判）。
+    """
+    if expect is None:
+        return None, None
+    return (expect.pid or None), (expect.klass or None)
 
 
 def captured_name(kind: str, seq: int, **kwargs) -> str:

@@ -24,7 +24,10 @@ from cu.desktop.overlay import OverlayState
 class FakeOverlay:
     """替代 ControlOverlay：只实现控制器用到的状态面，不建窗口。"""
 
-    def __init__(self) -> None:
+    def __init__(self, on_abort=None, on_error=None) -> None:
+        # 签名与真实 `ControlOverlay` 对齐：控制器会把这两个回调透传进来。
+        self.on_abort = on_abort
+        self.on_error = on_error
         self._state = OverlayState.OFF
         self.transitions: list[str] = []
 

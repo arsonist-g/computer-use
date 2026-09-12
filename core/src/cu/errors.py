@@ -77,7 +77,8 @@ HINTS: dict[ErrorCode, str] = {
     ErrorCode.VLM_FAILED: "多模态端点调用失败；检查 base_url / api_key。原始结构化数据仍可用。",
     ErrorCode.DANGEROUS_KEY_BLOCKED: "该按键序列在黑名单中；确需执行请加 `--force`。",
     ErrorCode.ABORTED_BY_USER: "用户主动中止；不要自动重来，先与用户确认。",
-    ErrorCode.INTERNAL_ERROR: "未预期错误；详见 daemon 日志（路径见错误详情）。",
+    ErrorCode.INTERNAL_ERROR: "未预期错误；详见 daemon 日志（路径在 detail.log，"
+                             "默认 `~/.computer-use/logs/daemon.log`）。",
 }
 
 #: 错误码 → 退出码分类。不逐码一对一，按大类划分。

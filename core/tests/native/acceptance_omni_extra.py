@@ -49,7 +49,8 @@ def cu(*args: str, timeout: float = 1200.0) -> tuple[int, str, str]:
 
 
 def cu_json(*args: str, timeout: float = 1200.0) -> dict:
-    _code, out, _err = cu("--json", *args, timeout=timeout)
+    # `--json` 写在**最后**（子命令之后）：契约 §1.5 的写法，顺带覆盖 F11 的形态。
+    _code, out, _err = cu(*args, "--json", timeout=timeout)
     try:
         return json.loads(out)
     except json.JSONDecodeError:
@@ -184,12 +185,13 @@ def check_7_7(hwnd: str, session: str) -> None:
             record("7.7", "失败", f"改不了端点：exit={code} {err.splitlines()[:1]}")
             return
         started = time.monotonic()
-        code, out, err = cu("--json", "parse", "--hwnd", hwnd, "--ai", "--session", session)
+        # `--json` 写在**子命令之后** —— 契约 §1.5 的写法。
+        code, out, err = cu("parse", "--hwnd", hwnd, "--ai", "--session", session, "--json")
         elapsed = time.monotonic() - started
-        # **错误走 stderr，成功走 stdout** —— `--json` 只决定格式，不决定流。
-        # 契约里没有钉死这一点（只在 §5 画了「stdout + exit code」），
-        # 所以两边都要读，不能只看 stdout。
-        raw = out or err
+        # **错误信封也走 stdout**（Q-025 / 契约 §5 Delta）：`--json` 决定格式，流跟着它走 ——
+        # 集成方只读 stdout 也不会漏掉错误。这里**只读 stdout**，正是为了让
+        # 「错误跑回 stderr」这件事一旦回归就立刻变红。
+        raw = out
         try:
             error = (json.loads(raw).get("error") or {}) if raw else {}
         except json.JSONDecodeError:

@@ -234,23 +234,24 @@
 
 ## 验收过程发现的缺陷（2026-09-13）
 
-这一轮补驱动时抓出来的，**不是清单里的条目**。前 7 条当场修掉并复跑通过，
-每条都留了守卫或回归检查；F5 是设计缺口，需你定夺。
+这一轮补驱动时抓出来的，**不是清单里的条目**。当天修掉 7 条并复跑通过（F2 / F3 / F6 / F7a /
+F7b / F8 / F9）；剩下 5 条（F1 / F4 / F5 / F10 / F11）于同日处置完毕 —— 见下表「处置」列，
+每条都留了守卫（单元测试 + 真机脚本），并在文末「验收结论」里给了复验结果。
 
 | # | 缺陷 | 证据 | 处置 |
 |---|---|---|---|
-| F1 | `daemon.log` **从未被写入**（`config.daemon_log` 定义了但没有任何写入者，`logs/` 目录不存在），而 `internal_error` 的 hint 让人「详见 daemon 日志」 | 全仓 grep：只有定义处引用它 | 未修 —— 要补一个日志层，是设计决定 |
+| F1 | `daemon.log` **从未被写入**（`config.daemon_log` 定义了但没有任何写入者，`logs/` 目录不存在），而 `internal_error` 的 hint 让人「详见 daemon 日志」 | 全仓 grep：只有定义处引用它 | ✅ **已修**（DEC-053）：新增 daemon 日志层（一个文件 / 字节上限 / **截头保尾** / 绝不写 api_key），接进程起停 · 未捕获异常 · 控制器与钩子失败三处。守卫：`tests/unit/test_daemon_log.py`；§F1 复验：文件存在且含启动记录 |
 | F2 | 窗口截图 `origin` 用的是 `GetWindowRect`，含不可见调整边框（本机 125% 缩放下左右各 7px），与图像实际左边缘差 7px；`win32.extended_frame_bounds` 明明写好了却**零调用**，注释还写反了 | §2.2 实测：图像 886x553 = DWM 扩展框，而 origin 报的是 GetWindowRect 的 (300,220) | ✅ 已修：`capture_window` 改用 DWM 扩展框；`desktop_smoke.py` 新增 T3b 守卫 |
 | F3 | **DXGI 层保存出全黑图**：`_frame_is_black` 读 `frame.frame_buffer`，而 `DxgiDuplicationFrame` **没有这个属性**（内部叫 `_raw_buffer`），异常被兜底吞成「不黑」——黑帧检测在 DXGI 路径上等于没有，新建会话后的第一帧（整帧全黑）被原样存成文件 | §3.2/§3.4 实测：3440x1440、均值 0.00 的 PNG；同会话随后几帧 `to_numpy().mean()` 是 86.87 / 110.27 | ✅ 已修：判据在缺 `frame_buffer` 时改走 `to_numpy()` |
-| F4 | `lock unlock --force` 不带会话身份时，这次强夺在 sessions/ 与 logs/ 下**任何文件里都不留痕**，而契约写着「记入操作日志」 | §5.2b 实测：reason 字符串在 data dir 下搜不到 | 未修 —— 需要一个兜底日志位（与 F1 同源） |
-| F5 | `window_stale`（hwnd 被复用给别的进程）这条检查在实际链路里**不可达**：`check_hwnd(hwnd)` 的 `expect_pid` / `expect_class` 从来没有人传，`_preflight` 只传了 hwnd | `core/src/cu/desktop/real.py:165` 是全仓唯一调用点 | 未修 —— 是设计缺口，需要定「期望身份从哪来」 |
+| F4 | `lock unlock --force` 不带会话身份时，这次强夺在 sessions/ 与 logs/ 下**任何文件里都不留痕**，而契约写着「记入操作日志」 | §5.2b 实测：reason 字符串在 data dir 下搜不到 | ✅ **已修**（DEC-054）：强夺**永远**写 daemon 日志，有会话身份时**额外**写那条会话的 `ops.md`。守卫：`tests/unit/test_daemon_force_unlock.py`；§5.2b 断言**翻面**后通过（日志里有、sessions/ 下没有） |
+| F5 | `window_stale`（hwnd 被复用给别的进程）这条检查在实际链路里**不可达**：`check_hwnd(hwnd)` 的 `expect_pid` / `expect_class` 从来没有人传，`_preflight` 只传了 hwnd | `core/src/cu/desktop/real.py:165` 是全仓唯一调用点 | ✅ **已修**（DEC-055）：期望身份 = 会话里该窗口**最近一次截图**的 pid/class，由 daemon 侧解析（只有它持有 `Sessions`），没有记录就放行。守卫：`tests/unit/test_daemon_write_preflight.py`；真机 `tests/native/acceptance_preflight.py` 四条全过，两条实测到 `window_stale` |
 | F6 | `--ai` 失败时**连已经算出来的检测结果一起丢**：md 是在 VLM 之后才写的，`vlm_failed` 的提示语却写着「原始结构化数据仍可用」 | §7.7 首跑：配错端点后什么文件都没留下 | ✅ 已修：worker 先落盘基础 `-omni-` md 再抛错，路径放进 `detail.base_markdown` |
 | F7a | **全新安装必然失败**：`uv venv` 没指定 Python，用机器默认的 3.10，而项目要求 `>=3.11`，装依赖无解。报错形如「only cu==0.1.0 is available…」，读起来像 PyPI 上有重名包，指不到真正原因 | §8.2 首跑：`uv venv` 建出 CPython 3.10.20 | ✅ 已修：从 `pyproject.toml` 读 `requires-python` 传给 `uv venv --python` |
 | F7b | 镜像回退的失败信息**只印第二次（官方源）的报错**，第一次的 403 与索引源被盖掉，与 DEC-042 要求的「透出索引源与状态码」不符 | §8.3 首跑：报错里既没有索引源也没有 403 | ✅ 已修：两次的 stderr 都打出来 |
 | F8 | `config set vlm.base_url` **对桌面层不生效**：`RealDesktop` 持有构造时那份 Config，daemon 只换了自己那份 —— 改完端点，`parse --ai` 照样打到旧模型 | §7.7：配了死端点仍成功返回，耗时 101s | ✅ 已修：`_config_set` 同时更新桌面层的 config |
 | F9 | worker 的错误码被**一律塌缩成 `omni_failed`**（只放行 `omni_not_installed`），`vlm_failed` 降级成 `detail` 里的一个字符串 —— AI 拿到的分支依据是错的（「重试一次」而不是「检查 base_url」） | §7.7：明明是端点坏了，报的是「解析进程异常」 | ✅ 已修：按码透传，三者都在 |
-| F10 | `--json` 的错误走 **stderr**、成功走 **stdout**。契约没写死这件事（只在 §5 画了「stdout + exit code」），但集成方只看 stdout 会漏掉全部错误 | §7.7 首跑：stdout 0 字符 / stderr 432 字符 | 未修 —— 要么改行为，要么把约定写进契约。**这是契约问题，需要你定**（Q-025） |
-| F11 | **嵌套子命令没挂 common 父解析器**：`daemon status --json` / `config show --json` / `session list --json` / `lock status --json` 一律 `unrecognized arguments`（退出码 2），选项必须写在顶层子命令**之前**才认。而契约 §1.5 的示例写法正是「选项跟在子命令之后」 | 验收 §5 首跑：`daemon status --json` exit=2、`--json daemon status` exit=0 | 未修 —— 顶层子命令（`screenshot` / `click` …）挂着 common，嵌套的没挂，是一处一致性问题 |
+| F10 | `--json` 的错误走 **stderr**、成功走 **stdout**。契约没写死这件事（只在 §5 画了「stdout + exit code」），但集成方只看 stdout 会漏掉全部错误 | §7.7 首跑：stdout 0 字符 / stderr 432 字符 | ✅ **已修**（DEC-056）：`--json` ⟹ 错误信封**也走 stdout**，契约 §5 追加 Delta。守卫：`tests/unit/test_client_error_stream.py`；§7.7 现在**只读 stdout** 取错误码并通过 |
+| F11 | **嵌套子命令没挂 common 父解析器**：`daemon status --json` / `config show --json` / `session list --json` / `lock status --json` 一律 `unrecognized arguments`（退出码 2），选项必须写在顶层子命令**之前**才认。而契约 §1.5 的示例写法正是「选项跟在子命令之后」 | 验收 §5 首跑：`daemon status --json` exit=2、`--json daemon status` exit=0 | ✅ **已修**（DEC-057）：嵌套子命令一律挂 `parents=[common]`，`session info/end` 各自那份 `--session` 一并撤掉；旧写法仍可用。守卫：`tests/unit/test_client_nested_options.py`；验收脚本改用契约写法，§F11 复验五条均无 exit=2 |
 
 ---
 
@@ -263,6 +264,10 @@
 - **需要人眼的部分已全部跑完**：§4 各项 + §1（2026-09-12）、§4.10（2026-09-13 复跑）。
   判为「不适用」的 8 项都不是「没验」，而是**本机无法构造**（多显示器 / 独占全屏 /
   提权窗口 / 钩子超时），每条都写了实测理由
-- 尚未处置的是文末缺陷表里**未修**的 5 条（F1 / F4 / F5 / F10 / F11），
-  已整理成 Q-022 ~ Q-025，各需要一次取舍
+- 文末缺陷表**全部处置完毕**：F2 / F3 / F6 / F7a / F7b / F8 / F9 当天修（结论见上），
+  剩下 5 条（F1 / F4 / F5 / F10 / F11）于 2026-09-13 补上，各配一条 DEC（053 ~ 057）
+- 补完之后的复验：`pytest` **457 全绿**（原 400）· `ruff` 干净（`src` + `tests`）·
+  `tests/native/acceptance_preflight.py`（**新增**，§2.3 写操作前置的期望身份）**四条全过** ·
+  `acceptance_lifecycle.py` §5 **十三项全过**（含 §5.2b 断言翻面、§F1、§F11）·
+  `acceptance_omni_extra.py --only 7.7` 通过（错误码改从 **stdout** 读）
 - 结论人：________

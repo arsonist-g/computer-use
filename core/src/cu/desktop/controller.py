@@ -54,10 +54,14 @@ class WriteSequenceController:
     """
 
     def __init__(self, *, on_abort: Callable[[], None] | None = None,
-                 on_state_change: Callable[[str], None] | None = None) -> None:
+                 on_state_change: Callable[[str], None] | None = None,
+                 on_error: Callable[[str], None] | None = None) -> None:
         self.on_abort = on_abort
         self.on_state_change = on_state_change
-        self.overlay = ControlOverlay()
+        #: 覆盖层渲染失败的落点。daemon 把它接到诊断日志上 —— 覆盖层自己只会打一行
+        #: stderr，而 detached 的 daemon 上 stderr 是 DEVNULL（Q-022）。
+        self.on_error = on_error
+        self.overlay = ControlOverlay(on_error=on_error)
         self.blocker = InputBlocker(on_abort=self._handle_physical_esc)
         self._armed_at: float | None = None
         self._hold_until = 0.0
