@@ -176,6 +176,12 @@ def build_parser() -> argparse.ArgumentParser:
     setter.add_argument("key")
     setter.add_argument("value")
 
+    setup = add("setup", "安装可选组件")
+    setup_sub = setup.add_subparsers(dest="setup_target", metavar="<omni>")
+    omni_cmd = setup_sub.add_parser("omni", help="装配 OmniParser 环境（约 1.4GB 权重）")
+    omni_cmd.add_argument("--force", action="store_true", help="重装依赖")
+    omni_cmd.add_argument("--skip-weights", action="store_true", help="不下权重")
+
     daemon = add("daemon", "daemon")
     daemon_sub = daemon.add_subparsers(dest="daemon_command", metavar="<status|stop>")
     daemon_sub.add_parser("status", help="PID / 启动时间 / 管道名 / 活跃会话 / 占用")
@@ -252,6 +258,13 @@ def to_request(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         if args.config_command == "set":
             return "config.set", {"key": args.key, "value": args.value}
         raise CUError(ErrorCode.INVALID_PARAMS, "config 需要一个子命令：show / set")
+    if command == "setup":
+        if args.setup_target == "omni":
+            return "daemon.setup_omni", {
+                "force": bool(getattr(args, "force", False)),
+                "skip_weights": bool(getattr(args, "skip_weights", False)),
+            }
+        raise CUError(ErrorCode.INVALID_PARAMS, "setup 需要一个目标：omni")
     if command == "daemon":
         if args.daemon_command == "status":
             return "daemon.status", {}
@@ -341,6 +354,11 @@ def render_text(command: str, result: Any, verbose: bool = False) -> str:
                 f"held={holder['held_for_s']}s  idle={holder['idle_for_s']}s")
     if command == "config":
         return json.dumps(result, ensure_ascii=False, indent=2)
+    if command == "setup":
+        lines = [f"{key}: {value}" for key, value in result.items() if key != "steps"]
+        if result.get("steps"):
+            lines.append("本次执行: " + "、".join(result["steps"]))
+        return "\n".join(lines)
     if command == "daemon":
         if "stopping" in result:
             return f"daemon 正在停止（pid={result['pid']}）"

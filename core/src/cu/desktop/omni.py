@@ -16,12 +16,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 from ..errors import CUError, ErrorCode
 
 ENV_OMNI_HOME = "COMPUTER_USE_OMNI_HOME"
+ENV_OMNI_WEIGHTS = "COMPUTER_USE_OMNI_WEIGHTS"
 
 #: worker 的冷启动上限。加载 1.3GB 权重 + 首帧推理，机器慢时要几分钟。
 DEFAULT_TIMEOUT = 900.0
@@ -35,6 +35,27 @@ def omni_python() -> Path:
     return Path.home() / ".computer-use" / "venv-omni" / "Scripts" / "python.exe"
 
 
+def omni_source() -> Path:
+    """OmniParser 源码根目录（`setup omni` 克隆下来的）。
+
+    **这三个路径函数放在这里而不是 worker 里**：base 侧要能回答「环境装在哪」，
+    而 worker 跑在另一个解释器里 —— base 拿不到它的函数。两边各有一份的话
+    迟早漂移，所以以这里为准，worker 用环境变量接。
+    """
+    override = os.environ.get(ENV_OMNI_HOME)
+    if override:
+        return Path(override)
+    return Path.home() / ".computer-use" / "OmniParser"
+
+
+def omni_weights() -> Path:
+    """权重根目录。布局见 DEC-044（描述模型必须平铺）。"""
+    override = os.environ.get(ENV_OMNI_WEIGHTS)
+    if override:
+        return Path(override)
+    return Path.home() / ".computer-use" / "models"
+
+
 def worker_script() -> Path:
     """worker 脚本的路径。
 
@@ -42,7 +63,9 @@ def worker_script() -> Path:
     """
     override = os.environ.get(ENV_OMNI_HOME)
     if override:
-        return Path(override) / "worker.py"
+        candidate = Path(override) / "worker.py"
+        if candidate.is_file():
+            return candidate
     # core/src/cu/desktop/omni.py -> 上溯到仓库根 -> omni/worker.py
     return Path(__file__).resolve().parents[4] / "omni" / "worker.py"
 
@@ -153,5 +176,5 @@ def worker_argv() -> list[str]:
     return [str(omni_python()), str(worker_script()), "--stdio"]
 
 
-__all__ = ["available", "call_parse", "omni_python", "worker_argv", "worker_script",
-           "DEFAULT_TIMEOUT", "sys"]
+__all__ = ["DEFAULT_TIMEOUT", "available", "call_parse", "omni_python", "omni_source",
+           "omni_weights", "worker_argv", "worker_script"]

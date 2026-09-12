@@ -233,6 +233,7 @@ class Daemon:
             "lock.forceUnlock": self._lock_force_unlock,
             "config.get": self._config_get,
             "config.set": self._config_set,
+            "daemon.setup_omni": self._setup_omni,
             "daemon.status": self._daemon_status,
             "daemon.stop": self._daemon_stop,
         }
@@ -449,6 +450,19 @@ class Daemon:
             omni_ready=omni_ready,
             omni_reason=omni_reason,
         ).to_dict()
+
+    def _setup_omni(self, params: dict) -> dict:
+        """装配 omni 环境。**耗时很长**（下 1.4GB 权重），因此 CLI 侧超时要放宽。
+
+        跑在 daemon 里而不是客户端里：环境与 daemon 同属一个部署单元，
+        让客户端进程去装会让「谁负责这个环境」变得含糊。
+        """
+        from ..desktop import omni_setup
+
+        return omni_setup.run_setup(
+            force=bool(params.get("force")),
+            skip_weights=bool(params.get("skip_weights")),
+        )
 
     def _daemon_stop(self, _params: dict) -> dict:
         self.request_stop()
