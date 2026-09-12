@@ -107,7 +107,8 @@ class RealDesktop:
             image_path=str(source), out_dir=out_dir, file_name=name, ai=ai,
             vlm={"base_url": self.config.vlm.base_url,
                  "api_key": self.config.vlm.api_key,
-                 "model_name": self.config.vlm.model_name},
+                 "model_name": self.config.vlm.model_name,
+                 "user_agent": self.config.vlm.user_agent},
             extra_elements=uia_elements or None,
         )
         return ParseResult(

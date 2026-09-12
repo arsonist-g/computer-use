@@ -610,22 +610,59 @@ def optimize_with_vlm(original: dict, image_path: str, config: dict) -> dict:
         "temperature": 0,
     }).encode("utf-8")
 
-    request = urllib.request.Request(
-        f"{base_url}/chat/completions", data=body,
-        headers={"Content-Type": "application/json",
-                 **({"Authorization": f"Bearer {api_key}"} if api_key else {})},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:500]
-        raise WorkerError(VLM_FAILED, f"端点返回 {exc.code}",
-                          hint="检查 base_url / api_key；原始结构化数据仍可用",
-                          detail={"status": exc.code, "body": detail}) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise WorkerError(VLM_FAILED, f"端点调用失败：{type(exc).__name__}: {exc}",
-                          hint="检查 base_url / api_key；原始结构化数据仍可用") from exc
+    headers = {
+        "Content-Type": "application/json",
+        # User-Agent 必须显式给：默认的 `Python-urllib/3.x` 会被不少 WAF
+        # 直接 403（实测 Cloudflare error code 1010）。
+        "User-Agent": config.get("user_agent") or "computer-use/0.1",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    # **端点路径要试两次。** 配置里的 `base_url` 可能是网关根
+    # （`https://host`），也可能是完整前缀（`https://host/v1`）。少了 `/v1`
+    # 时请求会打到网关的**网页首页**，拿回 200 但 Content-Type 是 text/html，
+    # 而报错是 JSON 解析失败 —— 看起来像端点坏了，实际只是路径不对。
+    # 这是**端点发现**的一次尝试，不是对模型调用的重试（DEC-011 的「不重试」针对后者）。
+    payload = None
+    failures: list[str] = []
+    for url in (f"{base_url}/chat/completions", f"{base_url}/v1/chat/completions"):
+        request = urllib.request.Request(url, data=body, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                raw = response.read()
+                content_type = response.headers.get("Content-Type", "")
+        except urllib.error.HTTPError as exc:
+            if exc.code in (404, 405):
+                failures.append(f"{url} -> {exc.code}")
+                continue
+            detail = exc.read().decode("utf-8", "replace")[:500]
+            raise WorkerError(VLM_FAILED, f"端点返回 {exc.code}",
+                              hint="检查 base_url / api_key；原始结构化数据仍可用",
+                              detail={"status": exc.code, "url": url, "body": detail}) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise WorkerError(VLM_FAILED, f"端点调用失败：{type(exc).__name__}: {exc}",
+                              hint="检查 base_url / api_key；原始结构化数据仍可用") from exc
+
+        # 拿到 JSON 才算成功；text/html 说明这是网关的首页而不是 API。
+        if "json" not in content_type.lower():
+            failures.append(f"{url} -> 200 但 Content-Type={content_type!r}（不是 API）")
+            continue
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            failures.append(f"{url} -> 响应不是合法 JSON")
+            continue
+        break
+
+    if payload is None:
+        raise WorkerError(
+            VLM_FAILED,
+            "端点未返回可用的 JSON 响应",
+            hint="检查 base_url —— 有些网关需要在 base_url 里带 `/v1`；"
+                 "或该地址其实是个网页而不是 API 入口。原始结构化数据仍可用。",
+            detail={"tried": failures},
+        )
 
     try:
         content = payload["choices"][0]["message"]["content"]

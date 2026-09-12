@@ -47,6 +47,14 @@ class VlmConfig:
     base_url: str = ""
     api_key: str = ""
     model_name: str = ""
+    #: 请求的 User-Agent。**默认不是 urllib 的默认值** —— 实测某端点（Cloudflare 前置）
+    #: 对 `Python-urllib/3.12` 直接返回 403 error code 1010（浏览器完整性检查），
+    #: 换成普通浏览器或 curl 的 UA 就通。不少 WAF 都拦默认客户端 UA，
+    #: 而这不是我们能控制的第三方行为，所以给一个能过大多数 WAF 的默认值并允许覆盖。
+    user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
 
 
 @dataclass(slots=True)
@@ -216,6 +224,7 @@ SETTABLE_KEYS: dict[str, str] = {
     "vlm.base_url": "str",
     "vlm.api_key": "str",
     "vlm.model_name": "str",
+    "vlm.user_agent": "str",
     "omni.env_path": "str",
     "omni.weights_dir": "str",
     "omni.mirror": "str",
