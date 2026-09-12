@@ -31,6 +31,7 @@ GWL_STYLE = -16
 GWL_EXSTYLE = -20
 
 WS_VISIBLE = 0x10000000
+WS_POPUP = 0x80000000
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
 WS_EX_LAYERED = 0x00080000
@@ -89,6 +90,28 @@ WM_SYSKEYDOWN = 0x0104
 WM_SYSKEYUP = 0x0105
 
 VK_ESCAPE = 0x1B
+
+#: 分层窗口（覆盖层）。`UpdateLayeredWindow` 是逐像素 alpha 的唯一上屏路径。
+SW_SHOWNOACTIVATE = 4
+SW_HIDE = 0
+HWND_TOPMOST = -1
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+ULW_ALPHA = 0x00000002
+AC_SRC_OVER = 0x00
+AC_SRC_ALPHA = 0x01
+BI_RGB = 0
+DIB_RGB_COLORS = 0
+PM_REMOVE = 0x0001
+BLACKNESS = 0x00000042
+SRCCOPY = 0x00CC0020
+#: `SetStretchBltMode` 的取值。**放大 32 位带 alpha 的 DIB 时只能用 COLORONCOLOR**：
+#: 实测 HALFTONE 会把第 4 个字节（alpha）整条丢掉，目的缓冲 alpha 全 0。
+COLORONCOLOR = 3
+TRANSPARENT_BK = 1
+ANTIALIASED_QUALITY = 4
+DEFAULT_CHARSET = 1
 
 ERROR_ALREADY_EXISTS = 183
 ERROR_INSUFFICIENT_BUFFER = 122
@@ -156,6 +179,21 @@ class MSG(ctypes.Structure):
     _fields_ = [("hwnd", wintypes.HWND), ("message", wintypes.UINT),
                 ("wParam", wintypes.WPARAM), ("lParam", wintypes.LPARAM),
                 ("time", wintypes.DWORD), ("pt", POINT)]
+
+
+class SIZE(ctypes.Structure):
+    _fields_ = [("cx", wintypes.LONG), ("cy", wintypes.LONG)]
+
+
+class LOGFONTW(ctypes.Structure):
+    _fields_ = [("lfHeight", wintypes.LONG), ("lfWidth", wintypes.LONG),
+                ("lfEscapement", wintypes.LONG), ("lfOrientation", wintypes.LONG),
+                ("lfWeight", wintypes.LONG), ("lfItalic", ctypes.c_ubyte),
+                ("lfUnderline", ctypes.c_ubyte), ("lfStrikeOut", ctypes.c_ubyte),
+                ("lfCharSet", ctypes.c_ubyte), ("lfOutPrecision", ctypes.c_ubyte),
+                ("lfClipPrecision", ctypes.c_ubyte), ("lfQuality", ctypes.c_ubyte),
+                ("lfPitchAndFamily", ctypes.c_ubyte),
+                ("lfFaceName", wintypes.WCHAR * 32)]
 
 
 #: 钩子过程的签名。两侧都是 `LRESULT (CALLBACK*)(int, WPARAM, LPARAM)`。
@@ -245,6 +283,22 @@ user32.GetKeyNameTextW.argtypes = [wintypes.LONG, wintypes.LPWSTR, ctypes.c_int]
 user32.VkKeyScanW.restype = ctypes.c_short
 user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
 
+# 分层窗口（overlay.py）。`CreateWindowExW` / `UpdateLayeredWindow` 都返回句柄或
+# BOOL，必须声明 —— 不声明时 ctypes 按 32 位 int 截断（本文件开头第 1 条纪律）。
+user32.CreateWindowExW.restype = wintypes.HWND
+user32.CreateWindowExW.argtypes = [
+    wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, ctypes.c_void_p]
+user32.UpdateLayeredWindow.restype = wintypes.BOOL
+user32.UpdateLayeredWindow.argtypes = [
+    wintypes.HWND, wintypes.HDC, ctypes.c_void_p, ctypes.c_void_p,
+    wintypes.HDC, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+user32.SetWindowPos.restype = wintypes.BOOL
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                wintypes.UINT]
+
 gdi32.CreateCompatibleDC.restype = wintypes.HDC
 gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
 gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
@@ -258,6 +312,40 @@ gdi32.DeleteObject.restype = wintypes.BOOL
 gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
 gdi32.DeleteDC.restype = wintypes.BOOL
 gdi32.DeleteDC.argtypes = [wintypes.HDC]
+gdi32.SetDIBits.restype = ctypes.c_int
+gdi32.SetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
+                            ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+gdi32.SetStretchBltMode.restype = ctypes.c_int
+gdi32.SetStretchBltMode.argtypes = [wintypes.HDC, ctypes.c_int]
+gdi32.StretchBlt.restype = wintypes.BOOL
+gdi32.StretchBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_int, wintypes.DWORD]
+gdi32.PatBlt.restype = wintypes.BOOL
+gdi32.PatBlt.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                         ctypes.c_int, wintypes.DWORD]
+# `CreateDIBSection` 返回位图句柄，并通过 `ppvBits` 交出**可直接读写**的像素指针 ——
+# 这是唯一不需要再 `GetDIBits` 一趟就能拿回像素的路径（文字覆盖率就是这么读的）。
+gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+gdi32.CreateDIBSection.argtypes = [wintypes.HDC, ctypes.c_void_p, wintypes.UINT,
+                                   ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE,
+                                   wintypes.DWORD]
+
+# 文字栅格化（胶囊）。这里只用来产出**覆盖率**，颜色与 alpha 由 overlay 合成。
+gdi32.CreateFontIndirectW.restype = wintypes.HFONT
+gdi32.CreateFontIndirectW.argtypes = [ctypes.POINTER(LOGFONTW)]
+gdi32.GetTextFaceW.restype = ctypes.c_int
+gdi32.GetTextFaceW.argtypes = [wintypes.HDC, ctypes.c_int, wintypes.LPWSTR]
+gdi32.SetBkMode.restype = ctypes.c_int
+gdi32.SetBkMode.argtypes = [wintypes.HDC, ctypes.c_int]
+gdi32.SetTextColor.restype = wintypes.COLORREF
+gdi32.SetTextColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
+gdi32.TextOutW.restype = wintypes.BOOL
+gdi32.TextOutW.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int,
+                           wintypes.LPCWSTR, ctypes.c_int]
+gdi32.GetTextExtentPoint32W.restype = wintypes.BOOL
+gdi32.GetTextExtentPoint32W.argtypes = [wintypes.HDC, wintypes.LPCWSTR, ctypes.c_int,
+                                        ctypes.POINTER(SIZE)]
 
 dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
 dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD,

@@ -11,13 +11,16 @@
 4. **第一版看门狗 8 秒** —— 用户反馈还没反应过来就解封了，那种情况下
    「Esc 生效」与「看门狗兜底」观感上分不开，等于把要验的东西搅浑。
    现在 **30 秒**，且**显示实时倒计时**。
+5. **第一版 §4 全项「看不到覆盖层」** —— 那不是观感问题，是两个真实缺陷：
+   窗口建在从不抽消息的主线程上，5 秒后被判定无响应、进程被 WER 结束（AppHangB1）；
+   光晕的几何写成了「到屏幕中心的距离」而不是「到最近边的距离」，
+   画出来是屏幕正中一块十字形色块。两个都已修，各留了一条守卫（desktop_smoke T9/T8）。
 
 ## 现在的设计
 
 - **每一项都由你按物理 Esc 结束**，看门狗只是兜底（30 秒，有倒计时）。
 - **不碰任何编辑器**。验「键被吞了」就在终端里敲字看有没有出现（不回车不会提交）。
-- §4 先做**前置确认**：覆盖层到底有没有显示。上一轮用户反馈「完全没看到」，
-  那是「覆盖层没显示」而不是观感问题 —— 必须先把它分出来。
+- §4 先做**前置确认**：覆盖层到底有没有显示，并先把「该看哪儿、多大」讲清楚。
 
 跑法（在**你自己的终端**里）：
     .venv/Scripts/python.exe core/tests/native/guided_acceptance.py
@@ -248,18 +251,19 @@ def _spawn_blocking_helper() -> subprocess.Popen | None:
 
 
 def section4() -> None:
-    from cu.desktop.overlay import ControlOverlay, OverlayState
+    from cu.desktop.overlay import (  # noqa: PLC0415
+        _CURSOR_GLOW_PX,
+        _PILL_TOP_RATIO,
+        _TARGET_GLOW_PX,
+        _TARGET_RING_PX,
+        ControlOverlay,
+        OverlayState,
+        _read_screen,
+    )
 
     say("\n" + "=" * 72)
     say("§4 覆盖层观感")
     say("=" * 72)
-    say("""
-  覆盖层被 WDA 排除出所有截图管线，**脚本截不到它** —— 只能你看。
-
-  [!] 先做前置确认：**你应当能看到覆盖层本身**（四边光晕 + 顶部胶囊）。
-      上一轮用户反馈「完全没看到」—— 那是「覆盖层没显示」，不是观感问题。
-      如果这一节你**依然什么都看不到**，请直接说 —— 那要先去修覆盖层本身。
-""")
 
     overlay = ControlOverlay()
     overlay.start()
@@ -268,20 +272,43 @@ def section4() -> None:
         overlay.set_target(target)
         overlay.set_cursor(cursor)
         overlay.transition(state)
+        # **等首帧真的上屏再计时**。设了状态与画上去了是两件事；不等的话，
+        # 「还没画」会被读成「画得不对」。
+        if not overlay.wait_ready(timeout=8.0):
+            say(f"        [!] 这一帧没能上屏：{overlay.last_error!r}")
         for remaining in range(int(seconds), 0, -1):
             say(f"        显示中… 剩余 {remaining:2d} 秒")
             time.sleep(1.0)
 
+    screen = _read_screen()
+    pill_top = int(screen.short_side * _PILL_TOP_RATIO)
+    reach = max(24, int(screen.short_side * 0.24))
+    say(f"""
+  覆盖层被 WDA 排除出所有截图管线，**脚本截不到它** —— 只能你看。
+  （另有一条上屏取证：overlay_visual_check.py 会临时关掉 WDA 再截图，
+    那条验的是「在不在屏幕上」，观感仍然只能人眼看。）
+
+  先说清楚该看哪儿、多大，免得对着屏幕猜：
+    · 四边的光谱光晕：从每条边向内约 {reach}px 羽化到完全透明（本机短边 {screen.short_side}px 的 24%）。
+      **没有边框、没有硬边**，越靠边越浓，顶部最浓、底部最淡。
+    · 顶部胶囊：屏幕水平居中，高约 {int(screen.short_side * 0.022)}px 上下（跟随 14px 字号，不随分辨率缩放），
+      距顶边约 {pill_top}px。深色实体胶囊 + 白字 + 左侧一个状态色圆点。
+    · Active 态才有：琥珀色目标框（{_TARGET_RING_PX}px 实线 + {_TARGET_GLOW_PX}px 外发光）、
+      光标处 {_CURSOR_GLOW_PX}px 白色光晕。
+
+  [!] 上一轮你「完全没看到」—— 根因是两个真实缺陷（窗口 5 秒后被判定无响应而
+      进程被杀；光晕的几何写反成了屏幕中央的十字）。两个都已修并各留了一条守卫。
+      如果这一节你**依然什么都看不到**，请直接说。
+""")
+
     try:
         # ---- 4.0 前置确认：覆盖层到底有没有出现 ----
         say("\n  【4.0】先确认覆盖层有没有显示。接下来 10 秒，请看屏幕：")
-        say("        应当看到：**四边的彩色光晕** + **顶部一个深色胶囊**（带文字）。")
+        say("        应当看到：**四边的光谱光晕** + **顶部一个深色胶囊**（带文字）。")
         show(OverlayState.ACTIVE, 10.0, target=(900, 600, 400, 300), cursor=(1700, 700))
         answer = ask("你看到覆盖层了吗？（四边光晕 + 顶部胶囊）")
         if not answer.startswith("y"):
             record("4.0", "失败", "覆盖层完全不可见 —— 下面的观感项全部无从验证")
-            overlay.transition(OverlayState.OFF)
-            overlay.stop()
             return
         record("4.0", "通过", "覆盖层可见（光晕 + 胶囊）")
 

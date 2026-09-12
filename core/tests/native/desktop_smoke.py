@@ -338,100 +338,145 @@ def show_visual(seconds: float = 6.0) -> None:
     print("    覆盖层已撤下。\n", flush=True)
 
 
-def t7_target_and_cursor() -> None:
-    """目标框与光标光晕**真的被画出来了吗**。
+def t7_target_ring() -> None:
+    """目标框的描边必须是 **2 个屏幕像素**，不是 2 个缓冲像素。
 
-    这一条存在的理由：这两个元素曾经「定义了但全代码库没人调用」—— 从代码上看
-    它们完备，从屏幕上看什么都没有。所以这里不看代码，只看渲染出来的像素。
+    这一条存在的理由：所有「刻意写死 px」的元素（描边、外发光、光标光晕、胶囊）
+    一度都被画在**降采样缓冲**上 —— 缓冲要放大 7 倍才上屏，于是 2px 描边变成了
+    14px 的粗线、52px 光标光晕变成了 373px 的雾团。它们必须在原生分辨率上画。
 
-    **为什么不去截屏验证**：覆盖层被 `WDA_EXCLUDEFROMCAPTURE` 排除出所有截图管线
-    （DEC-027 的设计意图），所以**任何截屏手段都看不见它** —— 包括 DXGI。
-    用截屏去验覆盖层，得到的永远是「什么都没画」。
-    （顺带修正一条：T6 的「帧间差 0.05」也不能证明覆盖层在场，那只是桌面噪声。
-    T6 真正证明的是「排除生效」，这个结论仍然成立。）
-
-    因此这里直接验渲染缓冲：目标框必须在目标坐标上出现一个 2px 的环，
-    且**只有加上目标时才出现**。至于它最终长什么样，只能人眼看 ——
-    那一条在 `tests/acceptance.md` §4 里，不适合由脚本断言。
+    这里沿元素上边中点往上扫一列，数 alpha 满格的连续像素：正好 2 个才算对。
     """
-    from cu.desktop.overlay import ControlOverlay, OverlayState
-
-    overlay = ControlOverlay()
-    # 这个测试不建窗口，只测渲染；屏幕尺寸手动取，避免依赖窗口是否创建过。
-    overlay._screen = _screen_size()
-    overlay._state = OverlayState.ACTIVE
-    overlay._state_since = time.monotonic()
-
-    width = 480
-    height = max(1, int(overlay._screen.height * width / overlay._screen.width))
-    sx = width / overlay._screen.width
-    sy = height / overlay._screen.height
-
-    plain = overlay._build_pixels(width, height)
-    target = (900, 600, 24, 24)
-    overlay.set_target(target)
-    overlay.set_cursor((900, 600))
-    marked = overlay._build_pixels(width, height)
-
-    # 目标中心映射到缓冲坐标。
-    cx = int((target[0] + target[2] / 2) * sx)
-    cy = int((target[1] + target[3] / 2) * sy)
-    # 沿中心那一行往左扫，找 2px 实线环（alpha 接近 255）。
-    ring_hits = sum(1 for x in range(max(0, cx - 40), min(width, cx))
-                    if marked[(cy * width + x) * 4 + 3] > 240
-                    and plain[(cy * width + x) * 4 + 3] < 200)
-    changed = sum(1 for a, b in zip(plain[3::4], marked[3::4], strict=False) if a != b)
-
-    record("T7 目标框与光标光晕已绘制到缓冲",
-           ring_hits >= 2 and changed > 0,
-           f"目标映射到缓冲 ({cx},{cy}) · 该行找到 {ring_hits} 个实线环像素 "
-           f"（期望 ≥2，即 2px 环）· 与纯光晕相比变化 {changed} 个像素")
-    print("      ⚠️ 视觉呈现（光晕观感、胶囊、光标位置）只能人眼验，见 acceptance.md §4。",
-          flush=True)
-
-
-def _screen_size():
-    from cu.desktop.overlay import _read_screen
-
-    return _read_screen()
-
-
-def t8_overlay_blit_succeeds() -> None:
-    """覆盖层**真的能上屏**吗 —— 断言 `_blit` 不抛异常、且 `UpdateLayeredWindow` 成功。
-
-    这条存在的理由很具体：`_blit` 里漏了 `SelectObject(mem_dc, bitmap)` 时，
-    `SetDIBits` 写进一个不属于任何 DC 的位图，`UpdateLayeredWindow` 返回
-    `ERROR_GEN_FAILURE(31)`，**窗口整个是空的**。而旧代码不检查返回值 ——
-    于是「覆盖层完全不可见」在代码上完全看不出来，静默失败了两轮才被用户发现。
-
-    这条守卫就是那个缺失的断言。它是**渲染管线的端到端**检查：缓冲有内容 → 选进 DC
-    → SetDIBits → ULW 成功。不涉及窗口是否对用户可见（那只能人眼验）。
-    """
-    from cu.desktop.overlay import ControlOverlay, OverlayState, _read_screen
+    from cu.desktop.overlay import (  # noqa: PLC0415
+        _TARGET_GLOW_PX,
+        _TARGET_RING_PX,
+        ControlOverlay,
+        OverlayState,
+        _read_screen,
+    )
 
     overlay = ControlOverlay()
     overlay._screen = _read_screen()
-    overlay._ensure_window()
+    overlay._state = OverlayState.ACTIVE
+    overlay._state_since = time.monotonic()
+    target = (900, 600, 400, 300)
+    overlay.set_target(target)
+    detail = overlay._build_target(overlay._screen)
+    if detail is None:
+        record("T7 目标框描边宽度", False, "目标框没被画出来")
+        return
+
+    # 缓冲里元素左上角 = (外发光+环的边距, 同)；从**紧贴元素上边那一行往上**扫。
+    pad = _TARGET_GLOW_PX + _TARGET_RING_PX
+    column = pad + target[2] // 2
+    alphas = [detail.pixels[(row * detail.width + column) * 4 + 3]
+              for row in range(pad - 1, -1, -1)]
+    solid = 0
+    for value in alphas:
+        if value == 255:
+            solid += 1
+        else:
+            break
+    glow_bg = [value for value in alphas[solid:] if value > 0]
+    record(
+        "T7 目标框描边宽度（屏幕像素）",
+        solid == _TARGET_RING_PX and bool(glow_bg),
+        f"元素上边往上依次是 {solid} 个满 alpha 像素（期望 {_TARGET_RING_PX}）· "
+        f"再往外是 {len(glow_bg)} 个半透明外发光像素 · 缓冲 {detail.width}x{detail.height}",
+    )
+
+
+def t8_glow_is_at_edges() -> None:
+    """光晕必须画在**四边**，不是屏幕中央。
+
+    这条守卫针对一个非常难发现的写法错误：把「到最近边的距离」写成「到中心的距离」
+    （`min(|x-480/2|, |y-200/2|)` 而不是 `min(x, w-x, y, h-y)`）。两者只差一个 min，
+    画出来的却是屏幕正中一块十字形色块 —— 它亮在中央、在暗处淡出，肉眼很容易读成
+    「好像有点光」，而四边一个像素都没有。
+
+    判据很硬：所有非零 alpha 的像素都必须落在「离最近一条边 < reach」的区域内。
+    """
+    from cu.desktop.overlay import _REACH_RATIO, ControlOverlay, OverlayState, _read_screen  # noqa: PLC0415
+
+    width, height = 480, 200
+    overlay = ControlOverlay()
+    overlay._screen = _read_screen()
+    overlay._state = OverlayState.ACTIVE
+    overlay._state_since = time.monotonic()
+    glow = overlay._build_glow(overlay._screen, width, height, OverlayState.ACTIVE)
+    reach = max(6.0, min(width, height) * _REACH_RATIO)
+
+    total = interior = 0
+    for y in range(height):
+        for x in range(width):
+            if glow[(y * width + x) * 4 + 3] == 0:
+                continue
+            total += 1
+            if min(y + 0.5, height - y - 0.5, x + 0.5, width - x - 0.5) >= reach:
+                interior += 1
+    record(
+        "T8 光晕画在四边而非中央",
+        total > 0 and interior == 0,
+        f"非零 alpha {total} 个，其中落在中央区（离边 >= {reach:.0f} 缓冲像素）的 "
+        f"{interior} 个（期望 0）",
+    )
+
+
+def t9_overlay_window_does_not_hang() -> None:
+    """窗口属主线程必须抽消息 —— 否则 5 秒后被判定「无响应」，Windows 直接结束进程。
+
+    这条守卫针对的是一次真实的 AppHangB1：窗口建在主线程上，主线程随后阻塞在
+    等输入里，从不调用 `PeekMessage`。实测 `IsHungAppWindow` 恰好在第 5.0 秒翻成
+    True，随后 WER 弹出「程序已停止工作」并杀掉进程。
+
+    这里**刻意复刻那个条件**：主线程在循环里只 sleep，绝不抽消息。同时确认光晕真的
+    走了放大那一步（源缓冲比窗口小，`UpdateLayeredWindow` 不替你拉伸）。
+
+    屏幕会闪大约 8 秒，期间输入**不被封锁**，随时可以中断。
+    """
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
+
+    from cu.desktop.overlay import ControlOverlay, OverlayState  # noqa: PLC0415
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.IsHungAppWindow.restype = wintypes.BOOL
+    user32.IsHungAppWindow.argtypes = [wintypes.HWND]
+
+    overlay = ControlOverlay()
+    overlay.set_target((900, 600, 400, 300))
+    overlay.set_cursor((1700, 700))
+    overlay.start()
+    overlay.transition(OverlayState.ARMING)
+    overlay.transition(OverlayState.ACTIVE)
     try:
-        overlay._state = OverlayState.ACTIVE
-        overlay._state_since = time.monotonic()
-        overlay.set_target((900, 600, 300, 200))
-        overlay.set_cursor((1200, 700))
-        width = 480
-        height = max(1, int(overlay._screen.height * width / overlay._screen.width))
-        pixels = overlay._build_pixels(width, height)
-        try:
-            overlay._blit(pixels, width, height)
-        except Exception as exc:  # noqa: BLE001
-            record("T8 覆盖层能上屏（UpdateLayeredWindow）", False,
-                   f"_blit 抛异常：{type(exc).__name__}: {exc}")
+        ready = overlay.wait_ready(timeout=8.0)
+        if not ready:
+            record("T9 覆盖层窗口不挂起", False,
+                   f"首帧未就绪：{overlay.last_error!r}")
             return
-        nonzero = sum(1 for i in range(3, len(pixels), 4) if pixels[i] > 0)
-        record("T8 覆盖层能上屏（UpdateLayeredWindow）", nonzero > 0,
-               f"_blit 成功（无异常）· 缓冲非零像素 {nonzero} · "
-               f"尺寸 {width}x{height} → 屏幕 {overlay._screen.width}x{overlay._screen.height}")
+        hwnd = overlay._glow.hwnd
+        owner = user32.GetWindowThreadProcessId(hwnd, None)
+        same_thread = owner == overlay._thread.ident
+        scaled = overlay._glow._dst is not None
+
+        first_hung = None
+        started = time.monotonic()
+        while time.monotonic() - started < 7.0:      # 5 秒是挂起判定的门槛
+            if user32.IsHungAppWindow(hwnd):
+                first_hung = time.monotonic() - started
+                break
+            time.sleep(0.25)
+        record(
+            "T9 覆盖层窗口不挂起（属主线程抽消息）",
+            first_hung is None and same_thread and scaled,
+            f"8 秒内未被判定无响应={first_hung is None}"
+            + (f"（第 {first_hung:.1f}s 翻成挂起）" if first_hung else "")
+            + f" · 窗口属主=渲染线程 {same_thread} · 光晕经 GDI 放大上屏 {scaled}",
+        )
     finally:
-        overlay._destroy()
+        overlay.transition(OverlayState.OFF)
+        overlay.stop()
 
 
 def _grab_frame():
@@ -482,8 +527,9 @@ def main() -> int:
     t3_capture(out_dir, hwnd)
     t4_input()
     t6_overlay_exclusion(out_dir)
-    t7_target_and_cursor()
-    t8_overlay_blit_succeeds()
+    t7_target_ring()
+    t8_glow_is_at_edges()
+    t9_overlay_window_does_not_hang()
     if args.blocking:
         t5_blocking()
     else:
