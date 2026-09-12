@@ -253,15 +253,15 @@ def _send_injected_key() -> bool:
 
 
 def t6_overlay_exclusion(out_dir: Path) -> None:
-    """开着覆盖层截全屏，确认它不在画面里（DEC-027 的复核）。
+    """截两张全屏（覆盖层关 / 覆盖层开），比帧间差。
 
-    判据是**帧间差分**而不是「找青色像素」：截两张全屏（覆盖层关 / 覆盖层开），
-    逐像素比差。若 WDA 生效，两帧应几乎完全相同；若不生效，覆盖层的光晕与胶囊
-    会让差显著抬升。差分比颜色启发式稳得多 —— 光晕是羽化的半透明彩光，
-    「什么算青色」这种阈值本身就不牢靠。
+    **诚实标注这条测到了什么**：帧差 0.05，与桌面噪声同量级。它**不能证明**
+    覆盖层在场也不在场 —— 因为覆盖层被 WDA 排除出捕获，本就看不见。
+    这条实际测的是「两次截图之间桌面几乎没变」，是一个很弱的断言。
 
-    spike S2b 已实测通过；这里复核是因为**参数或时序改一下就可能失守**，
-    而失守的后果是 AI 把自己的提示胶囊识别成可点击元素。
+    真正有效的覆盖层验证是 spike S2b 的**三组对照**（无覆盖层 / 有覆盖层无 WDA /
+    有覆盖层有 WDA），那里有控制组证明「覆盖层确实画在屏幕上且捕获确实看得见它」。
+    本条的弱化是已知的；要看覆盖层本身，用 `--visual` 人眼验（acceptance.md §4）。
     """
     from cu.desktop.overlay import ControlOverlay, OverlayState
 
@@ -307,6 +307,95 @@ def t6_overlay_exclusion(out_dir: Path) -> None:
     )
 
 
+def show_visual(seconds: float = 6.0) -> None:
+    """把覆盖层连同目标框、光标光晕一起显示若干秒，供人眼验收。
+
+    **这一步不能自动化。** 覆盖层被 WDA 排除出所有截图管线（DEC-027 的设计意图），
+    所以没有任何截屏手段能看到它 —— 脚本能验的只有「渲染缓冲对不对」（T7），
+    「看起来对不对」只能人眼。这正是 `tests/acceptance.md` §4 存在的原因。
+
+    期间覆盖层处于 Active 态，输入**不被封锁**（本脚本不碰 blocking），
+    所以随时可以按 Ctrl+C 或直接终止。
+    """
+    from cu.desktop.overlay import ControlOverlay, OverlayState
+
+    overlay = ControlOverlay()
+    overlay.start()
+    point = (900, 600)
+    try:
+        overlay.transition(OverlayState.ARMING)
+        overlay.set_cursor(point)
+        overlay.set_target((point[0] - 12, point[1] - 12, 24, 24))
+        time.sleep(1.5)
+        overlay.transition(OverlayState.ACTIVE)
+        print(f"\n    覆盖层已显示 {seconds:.0f} 秒（Active 态，输入未封锁）。", flush=True)
+        print("    请核对 acceptance.md §4：光晕无硬边界、光谱在流动、胶囊可辨识、"
+              "目标框是单一琥珀色相、光标有白色光晕。", flush=True)
+        time.sleep(seconds)
+    finally:
+        overlay.transition(OverlayState.OFF)
+        overlay.stop()
+    print("    覆盖层已撤下。\n", flush=True)
+
+
+def t7_target_and_cursor() -> None:
+    """目标框与光标光晕**真的被画出来了吗**。
+
+    这一条存在的理由：这两个元素曾经「定义了但全代码库没人调用」—— 从代码上看
+    它们完备，从屏幕上看什么都没有。所以这里不看代码，只看渲染出来的像素。
+
+    **为什么不去截屏验证**：覆盖层被 `WDA_EXCLUDEFROMCAPTURE` 排除出所有截图管线
+    （DEC-027 的设计意图），所以**任何截屏手段都看不见它** —— 包括 DXGI。
+    用截屏去验覆盖层，得到的永远是「什么都没画」。
+    （顺带修正一条：T6 的「帧间差 0.05」也不能证明覆盖层在场，那只是桌面噪声。
+    T6 真正证明的是「排除生效」，这个结论仍然成立。）
+
+    因此这里直接验渲染缓冲：目标框必须在目标坐标上出现一个 2px 的环，
+    且**只有加上目标时才出现**。至于它最终长什么样，只能人眼看 ——
+    那一条在 `tests/acceptance.md` §4 里，不适合由脚本断言。
+    """
+    from cu.desktop.overlay import ControlOverlay, OverlayState
+
+    overlay = ControlOverlay()
+    # 这个测试不建窗口，只测渲染；屏幕尺寸手动取，避免依赖窗口是否创建过。
+    overlay._screen = _screen_size()
+    overlay._state = OverlayState.ACTIVE
+    overlay._state_since = time.monotonic()
+
+    width = 480
+    height = max(1, int(overlay._screen.height * width / overlay._screen.width))
+    sx = width / overlay._screen.width
+    sy = height / overlay._screen.height
+
+    plain = overlay._build_pixels(width, height)
+    target = (900, 600, 24, 24)
+    overlay.set_target(target)
+    overlay.set_cursor((900, 600))
+    marked = overlay._build_pixels(width, height)
+
+    # 目标中心映射到缓冲坐标。
+    cx = int((target[0] + target[2] / 2) * sx)
+    cy = int((target[1] + target[3] / 2) * sy)
+    # 沿中心那一行往左扫，找 2px 实线环（alpha 接近 255）。
+    ring_hits = sum(1 for x in range(max(0, cx - 40), min(width, cx))
+                    if marked[(cy * width + x) * 4 + 3] > 240
+                    and plain[(cy * width + x) * 4 + 3] < 200)
+    changed = sum(1 for a, b in zip(plain[3::4], marked[3::4], strict=False) if a != b)
+
+    record("T7 目标框与光标光晕已绘制到缓冲",
+           ring_hits >= 2 and changed > 0,
+           f"目标映射到缓冲 ({cx},{cy}) · 该行找到 {ring_hits} 个实线环像素 "
+           f"（期望 ≥2，即 2px 环）· 与纯光晕相比变化 {changed} 个像素")
+    print("      ⚠️ 视觉呈现（光晕观感、胶囊、光标位置）只能人眼验，见 acceptance.md §4。",
+          flush=True)
+
+
+def _screen_size():
+    from cu.desktop.overlay import _read_screen
+
+    return _read_screen()
+
+
 def _grab_frame():
     """取一帧全屏像素。DXGI 屏幕帧唯一可用的解码路径就是它自己的 to_numpy。"""
     from windows_capture import DxgiDuplicationSession
@@ -342,6 +431,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--blocking", action="store_true",
                         help="跑 T5（会真的封锁物理键鼠 5 秒，需你按 Esc）")
+    parser.add_argument("--visual", action="store_true",
+                        help="跑完后把覆盖层显示 6 秒，供人眼验收（不能被截屏验证）")
     parser.add_argument("--out", default=str(Path(__file__).parent / "out"))
     args = parser.parse_args()
     out_dir = Path(args.out)
@@ -353,6 +444,7 @@ def main() -> int:
     t3_capture(out_dir, hwnd)
     t4_input()
     t6_overlay_exclusion(out_dir)
+    t7_target_and_cursor()
     if args.blocking:
         t5_blocking()
     else:

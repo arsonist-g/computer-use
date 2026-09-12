@@ -34,6 +34,10 @@ from .ops import OpsEntry
 from .sessions import Sessions
 from .writelock import WriteLock
 
+#: 目标框的半径（像素）。写操作的落点用一个 24x24 的小方框标出来 ——
+#: 我们只知道 AI 给的屏幕坐标，不知道那上面是什么元素，所以不硬凑成大框。
+_TARGET_MARK_HALF = 12
+
 #: 一次写命令在 ops.md 里的命令名，以及它对应的桌面层方法。
 _WRITE_METHODS = frozenset({
     "input.click", "input.move", "input.drag", "input.scroll", "input.type", "input.key",
@@ -135,7 +139,12 @@ class Daemon:
             while not self._stop.wait(0.2):
                 # 写序列的保持窗口在这里推进：写操作之间隔一次 LLM 思考时，
                 # 覆盖层与输入封锁由这个 tick 决定何时退场。
+                was_visible = self.controller.overlay.visible
                 self.controller.tick()
+                if was_visible and not self.controller.overlay.visible:
+                    # 退场时清掉上一轮的标记，否则下次武装会先闪一下旧位置。
+                    self.controller.overlay.set_target(None)
+                    self.controller.overlay.set_cursor(None)
         except KeyboardInterrupt:
             pass
         finally:
@@ -491,6 +500,8 @@ class Daemon:
                 entry.detail = (entry.detail + " · " if entry.detail else "") + f"warning: {result.warning}"
             if result.detail.get("target"):
                 entry.target = str(result.detail["target"])
+            # 写完之后把「AI 点到了哪」画给用户看（目标框 + 光标光晕，仅 Active 态）。
+            self._show_write_feedback(label, params)
             return result.to_dict()
         except CUError as exc:
             entry.result = "error"
@@ -506,6 +517,41 @@ class Daemon:
             # 覆盖层也不在这里退场 —— 它由保持阈值决定（controller.tick）。
             # 这里只落日志 —— 失败的那次也要留痕。
             self.sessions.record_op(session_id, entry)
+
+    def _show_write_feedback(self, label: str, params: dict) -> None:
+        """把「AI 刚才点/移到哪」画到覆盖层上（目标框 + 光标光晕）。
+
+        没有这一步，overlay.md §2.1 状态表里 Active 态的目标框与光标两列就是空的 ——
+        用户只看得到边缘光晕和胶囊，看不到 AI 具体在动哪里。
+
+        **点状目标**（click/move/drag/scroll --at）用一个围绕落点的小方框表示。
+        刻意不按「元素」画：AI 给的是屏幕坐标，我们并不知道那个坐标上是什么元素，
+        硬凑一个大框反而会指错地方。小方框诚实地表达「就在这里」。
+
+        `type` / `key` 没有落点（目标是当前焦点窗口），因此只更新光标、不画框。
+        """
+        overlay = self.controller.overlay
+        point: tuple[int, int] | None = None
+        if label in ("click", "move"):
+            if params.get("x") is not None and params.get("y") is not None:
+                point = (int(params["x"]), int(params["y"]))
+        elif label == "drag":
+            if params.get("x2") is not None and params.get("y2") is not None:
+                point = (int(params["x2"]), int(params["y2"]))
+        elif label == "scroll":
+            at = params.get("at")
+            if isinstance(at, (list, tuple)) and len(at) == 2:
+                point = (int(at[0]), int(at[1]))
+        elif label in ("type", "key"):
+            # 没有坐标可画：目标是当前焦点窗口。保留系统光标位置，
+            # 不画目标框 —— 画一个假位置比不画更糟。
+            return
+
+        if point is None:
+            return
+        overlay.set_cursor(point)
+        half = _TARGET_MARK_HALF
+        overlay.set_target((point[0] - half, point[1] - half, half * 2, half * 2))
 
     def _require_session_id(self, params: dict) -> str:
         session_id = params.get("session_id")

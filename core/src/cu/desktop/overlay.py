@@ -48,6 +48,15 @@ _RENDER_WIDTH = 480
 #: 光谱流速：Arming 快，Active 慢（DEC-030 的 2s / 7s 一圈）。
 _SPIN_SECONDS = {"arming": 2.0, "active": 7.0}
 
+#: 目标框的 2px 实线环与 24px 外发光（MASTER §2.5 的 `--shadow-target`）。
+#: 这两个**刻意用 px 而不是比例**：它们是元素高亮的描边，与屏幕尺寸无关 ——
+#: 写死才能保证 1080p 与 4K 上看起来是同一条线。
+_TARGET_RING_PX = 2
+_TARGET_GLOW_PX = 24
+#: 光标光晕 52px（overlay.md §3.1）。同样刻意用 px，理由见 MASTER §2.5 的例外②：
+#: 系统光标的像素尺寸由 OS 与 DPI 决定，不随分辨率放大，否则 4K 上会变成巨大箭头。
+_CURSOR_GLOW_PX = 52
+
 #: 胶囊尺寸按字体走，不按屏幕（DEC-031 第 2 条约定的例外）。
 _PILL_HEIGHT_RATIO = 0.022
 _PILL_MIN_HEIGHT = 22
@@ -374,8 +383,99 @@ class ControlOverlay:
                 buffer[index + 2] = int(red * value)
                 buffer[index + 3] = value
 
+        # 叠放顺序：边缘光晕（已画） → 目标框 → 光标光晕 → 胶囊。
+        # 胶囊在最上，因为它是状态提示，不该被任何东西遮住。
+        self._draw_target(buffer, width, height)
+        self._draw_cursor(buffer, width, height)
         self._draw_pill(buffer, width, height)
         return buffer
+
+    def _draw_target(self, buffer: bytearray, width: int, height: int) -> None:
+        """目标元素高亮框：`0 0 0 2px <target色>` + `0 0 24px <target光晕>`（MASTER §2.5）。
+
+        **只在 Active 态显示** —— 出错或中止时 AI 已不在操作任何元素，
+        保留它会让用户以为操作还在进行（overlay.md §2.1）。
+
+        它是**单一琥珀色相**，不取光谱（MASTER §7 的 AVOID）：
+        「目标在哪」与「AI 在活动」是两个语义，混用会让用户分不清。
+        """
+        if self._target is None or self.state is not OverlayState.ACTIVE:
+            return
+        screen = self._screen
+        assert screen is not None
+        # 屏幕绝对坐标 → 缓冲坐标（缓冲是降采样的）。
+        sx = width / screen.width
+        sy = height / screen.height
+        tx, ty, tw, th = self._target
+        left = int(tx * sx)
+        top = int(ty * sy)
+        right = int((tx + tw) * sx)
+        bottom = int((ty + th) * sy)
+        if right <= left or bottom <= top:
+            return
+
+        # 琥珀：oklch(75% 0.17 60) 转成 sRGB 约 #F0A24B 一档。
+        ring = (75, 162, 240)          # BGRA
+        glow = (75, 162, 240)
+        glow_reach = max(3, int(_TARGET_GLOW_PX * min(sx, sy)))
+
+        # 外发光：环外一圈按距离衰减。
+        for y in range(max(0, top - glow_reach), min(height, bottom + glow_reach)):
+            for x in range(max(0, left - glow_reach), min(width, right + glow_reach)):
+                # 到矩形环的距离（在框内则为 0）。
+                dx = max(left - x, 0, x - right)
+                dy = max(top - y, 0, y - bottom)
+                distance = (dx * dx + dy * dy) ** 0.5
+                if distance > glow_reach:
+                    continue
+                alpha = int((1.0 - distance / glow_reach) ** 2 * 255 * 0.45)
+                if alpha <= 2:
+                    continue
+                _blend(buffer, width, x, y, glow, alpha)
+
+        # 2px 实线环。MASTER 明确要求它是实线（与边缘光晕的「无硬边界」不冲突：
+        # 那是背景光，这是元素高亮，两回事）。
+        for offset in range(_TARGET_RING_PX):
+            for x in range(max(0, left), min(width, right + 1)):
+                for y in (top + offset, bottom - offset):
+                    if 0 <= y < height:
+                        _blend(buffer, width, x, y, ring, 255)
+            for y in range(max(0, top), min(height, bottom + 1)):
+                for x in (left + offset, right - offset):
+                    if 0 <= x < width:
+                        _blend(buffer, width, x, y, ring, 255)
+
+    def _draw_cursor(self, buffer: bytearray, width: int, height: int) -> None:
+        """光标光晕：52px 径向渐变（overlay.md §3.1 第 1 层）。
+
+        **只画光晕，不替换系统光标。** 规范里「替换光标」是第 2 层，且带一条
+        降级路径：「若隐藏系统光标出现闪烁或不稳定，退回只画光晕 + 保留系统光标」。
+        Q-019 至今没验过隐藏光标稳不稳，而这里用的是 `UpdateLayeredWindow` ——
+        要画自绘箭头就得把**系统光标**藏掉，那是个全局副作用。
+        先走已验证的降级路径，把不确定的那一步留到真机验证之后。
+
+        光晕的意义是让光标在任意背景上都可见：浅色背景靠箭头本身，深色背景靠光晕。
+        """
+        if self._cursor is None or self.state is not OverlayState.ACTIVE:
+            return
+        screen = self._screen
+        assert screen is not None
+        sx = width / screen.width
+        sy = height / screen.height
+        cx = int(self._cursor[0] * sx)
+        cy = int(self._cursor[1] * sy)
+        radius = max(4, int(_CURSOR_GLOW_PX / 2 * min(sx, sy)))
+
+        for y in range(max(0, cy - radius), min(height, cy + radius + 1)):
+            for x in range(max(0, cx - radius), min(width, cx + radius + 1)):
+                distance = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                if distance > radius:
+                    continue
+                # 径向渐变：中心最亮，边缘归零。非线性，与边缘光晕同一条原则。
+                alpha = int((1.0 - distance / radius) ** 2.2 * 255 * 0.85)
+                if alpha <= 2:
+                    continue
+                _blend(buffer, width, x, y, (255, 255, 255), alpha)
 
     def _draw_pill(self, buffer: bytearray, width: int, height: int) -> None:
         """顶部胶囊：**纯深色实体胶囊 + 文字，无光晕、无描边**（DEC-031 第 3 条）。
@@ -496,6 +596,21 @@ class ControlOverlay:
         w.user32.UpdateLayeredWindow(
             self._hwnd, None, ctypes.byref(_POINT(screen.x, screen.y)), ctypes.byref(size),
             self._memdc, ctypes.byref(source), 0, ctypes.byref(blend), _ULW_ALPHA)
+
+
+def _blend(buffer: bytearray, width: int, x: int, y: int,
+           bgr: tuple[int, int, int], alpha: int) -> None:
+    """把一个半透明像素**叠加**到缓冲上（alpha 混合，不是覆盖）。
+
+    覆盖会把缓冲里已有的边缘光晕擦掉；目标框与光标都画在光晕之上，
+    必须叠加。alpha 越高越接近纯色。
+    """
+    index = (y * width + x) * 4
+    inv = 255 - alpha
+    for channel in range(3):
+        existing = buffer[index + channel]
+        buffer[index + channel] = (bgr[channel] * alpha + existing * inv) // 255
+    buffer[index + 3] = max(buffer[index + 3], alpha)
 
 
 def _read_screen() -> _Screen:
