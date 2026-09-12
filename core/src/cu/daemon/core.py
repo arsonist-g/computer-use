@@ -92,6 +92,7 @@ class Daemon:
         # 这个现场 —— detached 进程的 stderr 是 DEVNULL，打到那里等于没打（Q-022）。
         # `secrets` 登记已知密钥：整行落盘之前会被抹掉（硬约束：绝不写 api_key）。
         self.log = DaemonLog(config.daemon_log, config.daemon_log_limit_bytes,
+                             level=config.daemon_log_level,
                              secrets=[config.vlm.api_key])
         self.controller = WriteSequenceController(on_error=self._log_component_error)
         self.desktop: Desktop = desktop or build_desktop(config, self.controller)
@@ -508,6 +509,7 @@ class Daemon:
         # daemon_log_limit_bytes` / `vlm.api_key` 就成了定义了却不生效的项，
         # 那正是 Q-022 的成因（配置在，没有生效的写入者）。
         self.log.limit_bytes = updated.daemon_log_limit_bytes
+        self.log.level = updated.daemon_log_level
         self.log.register_secrets([updated.vlm.api_key])
         # **桌面层也要换**：它持有的是构造时那一份 Config，只换 daemon 自己那份的话，
         # 桌面层读到的仍是旧值。实测踩到过：`config set vlm.base_url` 指向一个死端点后，

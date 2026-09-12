@@ -34,7 +34,8 @@ CONTRACT_DEFAULTS = {
     "schema": 1,
     "data_dir": "",
     "storage_limit_bytes": 1 * 1024**3,  # 1 GiB = 1073741824
-    "daemon_log_limit_bytes": 10 * 1024**2,  # 10 MiB = 10485760
+    "daemon_log_limit_bytes": 500 * 1024**2,  # 500 MiB = 524288000
+    "daemon_log_level": "info",
     "lock_wait_seconds": 10,
     # DEC-045：前摇 1500→500（缩短后仍够「让手离开」），
     # 阈值 5→30 且退为兜底（正常由 `--continue` 决定）。
@@ -47,10 +48,11 @@ CONTRACT_DEFAULTS = {
     "mouse_max_points": 30,
 }
 
-# oracle: specified —— 领域规则：白名单 15 项，含 3 个 vlm.* 与 3 个 omni.*，不含 data_dir。
+# oracle: specified —— 领域规则：白名单，含 4 个 vlm.* 与 3 个 omni.*，不含 data_dir。
 CONTRACT_SETTABLE_KEYS = {
     "storage_limit_bytes",
     "daemon_log_limit_bytes",
+    "daemon_log_level",
     "lock_wait_seconds",
     "overlay_arm_ms",
     "overlay_hold_seconds",
@@ -84,7 +86,7 @@ def test_storage_limit_literals() -> None:
     # oracle: specified —— 决策日志里的字面量。
     cfg = Config()
     assert cfg.storage_limit_bytes == 1073741824
-    assert cfg.daemon_log_limit_bytes == 10485760
+    assert cfg.daemon_log_limit_bytes == 524288000
 
 
 def test_default_danger_keys() -> None:
@@ -409,9 +411,9 @@ def test_load_rejects_non_object_root(tmp_path: Path) -> None:
 
 def test_settable_keys_whitelist_is_exact() -> None:
     # oracle: specified —— 领域规则：白名单（含 4 vlm.* / 3 omni.*）。
-    # 17 项是 DEC-045 与 vlm.user_agent 之后的数量。
+    # 18 项是 DEC-045 / vlm.user_agent / DEC-053 的 daemon_log_level 之后的数量。
     assert set(SETTABLE_KEYS) == CONTRACT_SETTABLE_KEYS
-    assert len(SETTABLE_KEYS) == 17
+    assert len(SETTABLE_KEYS) == 18
 
 
 def test_settable_keys_excludes_data_dir() -> None:

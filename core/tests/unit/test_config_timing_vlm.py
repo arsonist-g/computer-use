@@ -117,9 +117,11 @@ def test_user_agent_is_exported_in_to_dict() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_settable_keys_include_new_fields_and_total_seventeen() -> None:
-    # oracle: specified —— DEC-045 新增 overlay_exit_hold_ms；VlmConfig 新增 user_agent。
+def test_settable_keys_include_new_fields_and_total_eighteen() -> None:
+    # oracle: specified —— DEC-045 新增 overlay_exit_hold_ms；VlmConfig 新增 user_agent；
+    # DEC-053 新增 daemon_log_level。
     assert "overlay_exit_hold_ms" in SETTABLE_KEYS
     assert "vlm.user_agent" in SETTABLE_KEYS
-    # oracle: specified —— 白名单总数 17。
-    assert len(SETTABLE_KEYS) == 17
+    assert "daemon_log_level" in SETTABLE_KEYS
+    # oracle: specified —— 白名单总数 18。
+    assert len(SETTABLE_KEYS) == 18

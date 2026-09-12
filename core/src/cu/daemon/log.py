@@ -1,4 +1,4 @@
-"""daemon 诊断日志 —— 出错时唯一的现场（Q-022 / DEC-038）。
+"""daemon 诊断日志 —— 出错时唯一的现场（Q-022 / DEC-038 / DEC-053）。
 
 **它存在的理由**：daemon 是 detached 进程（`DETACHED_PROCESS | CREATE_NO_WINDOW`，
 stdout/stderr 都接到 DEVNULL）。它出错时没有任何现场 —— 而 `internal_error` 的 hint
@@ -6,9 +6,12 @@ stdout/stderr 都接到 DEVNULL）。它出错时没有任何现场 —— 而 `
 `config.daemon_log` / `daemon_log_limit_bytes` 定义了却没有写入者，
 `~/.computer-use/logs/` 目录根本不存在。
 
-**滚动方向与工件清理刻意相反**：`storage.cleanup` 删**最旧**的工件（最旧优先），
-这里**截掉文件头部、保留尾部** —— 日志的价值全在最新那几行。出问题时要看的是
-「刚刚发生了什么」，不是三小时前的第一行。别照抄 `storage.cleanup`。
+**滚动方向与工件清理刻意相反**：`storage.cleanup` 删**最旧**的工件（按文件），
+这里在**同一个文件内**截掉头部、保留尾部 —— 日志的价值全在最新那几行。出问题时要看的是
+「刚刚发生了什么」，不是三小时前的第一行。**别照抄 `storage.cleanup`。**
+
+**级别过滤**：`config.daemon_log_level`（默认 `info` = 全写）是级别**下限**，
+低于它的记录直接丢掉 —— 噪音期把门槛提到 `warning` 就能只留值得看的那几行。
 
 **绝不写凭据**：`vlm.api_key` 进日志一次就等于把密钥落盘。构造时把已知的密钥值登记进
 `secrets`，写入前逐条抹成 `***` —— 靠机制，而不是靠「记得别写」。
@@ -29,21 +32,33 @@ from pathlib import Path
 
 #: 敏感值被抹掉后的占位符。
 _REDACTED = "***"
-#: 级别名。刻意只有三个 —— 这是给人看的现场，不是一套分级框架。
+#: 级别名（由低到高）。**必须与 `cu.config.LOG_LEVELS` 一致** —— 两者分居 daemon 层与
+#: 契约层（`config` 不能 import 本模块：那会把桌面层拖进 CLI 的冷路径），所以这份清单
+#: 写了两处，由 `tests/unit/test_daemon_log.py` 断言它们相同。
 LEVELS = ("info", "warning", "error")
+#: 级别 → 严重度。未知级别按**最高**严重度处理：宁可多写一行，也不要因为一次拼写错误
+#: 把一条消息静默丢掉。
+_SEVERITY = {name: index for index, name in enumerate(LEVELS, start=1)}
+_MAX_SEVERITY = max(_SEVERITY.values())
+
+#: 找行首时往后扫的窗口；拷贝保留段时的块大小。两者只影响峰值内存，不影响结果。
+_SCAN_CHUNK = 8192
+_COPY_CHUNK = 1 << 20
 
 
 class DaemonLog:
-    """追加写 + 按字节上限「截头保尾」。
+    """追加写 + 按字节上限「截头保尾」+ 级别过滤。
 
     线程安全：daemon 的 IPC 是一连接一线程，多个 handler 可能同时出错，
     追加与滚动必须在同一把锁里完成 —— 否则滚动会把另一条线程刚写的行切掉。
     """
 
-    def __init__(self, path: Path | str, limit_bytes: int, *,
+    def __init__(self, path: Path | str, limit_bytes: int, *, level: str = "info",
                  secrets: Iterable[str] = ()) -> None:
         self.path = Path(path)
         self.limit_bytes = max(0, int(limit_bytes))
+        #: 级别下限：低于它的记录直接丢掉。`info` = 全写。
+        self.level = level
         # 空串必须剔除：`str.replace("")` 会在每个字符间插占位符，把整行毁掉。
         self._secrets: list[str] = [s for s in secrets if s]
         self._lock = threading.Lock()
@@ -60,10 +75,13 @@ class DaemonLog:
         self.write("error", message, **fields)
 
     def write(self, level: str, message: str, **fields: object) -> None:
-        """写一行。**任何失败都不抛** —— 日志写不进去不该让正在处理的那条命令失败。
+        """写一行。级别低于门槛的直接丢掉；**任何写入失败都不抛** ——
+        日志写不进去不该让正在处理的那条命令失败。
 
         字段以 `key=value` 追加在消息之后；`fields` 为空则只写消息。
         """
+        if not self._passes(level):
+            return
         line = self._format(level, message, fields)
         try:
             with self._lock:
@@ -79,6 +97,13 @@ class DaemonLog:
             for value in secrets:
                 if value and value not in self._secrets:
                     self._secrets.append(value)
+
+    def _passes(self, level: str) -> bool:
+        """这条记录过不过门槛。"""
+        # 门槛认不出来时按**最宽**处理：`Config.validate` 会拦住非法配置，能走到这里
+        # 说明是代码里拼错了 —— 那时候宁可多写几行，也不要静默丢掉。
+        threshold = _SEVERITY.get(self.level, _SEVERITY["info"])
+        return _SEVERITY.get(level, _MAX_SEVERITY) >= threshold
 
     # ---- 内部 ----
 
@@ -107,24 +132,64 @@ class DaemonLog:
     def _enforce_limit(self) -> None:
         """超限就**截掉头部、保留尾部**（与 `storage.cleanup` 方向相反，见模块文档）。
 
-        保留段的起点若落在某一行中间，把那一行的残段一并丢掉 ——
-        半个时间戳比少一行更难读。
+        **不把整个文件读进内存**：默认上限是 500MB，`read_bytes()` 会让 daemon 在滚动
+        那一刻多占 500MB 常驻。这里改成「从尾部往前算偏移 → 扫一小段找到行首 →
+        分块拷贝保留段」，峰值内存只与块大小有关，与上限无关。
         """
         if self.limit_bytes <= 0:
             return
         try:
-            if self.path.stat().st_size <= self.limit_bytes:
+            size = self.path.stat().st_size
+            if size <= self.limit_bytes:
                 return
-            data = self.path.read_bytes()
+            start = self._keep_from(size)
+            self._rewrite_from(start, size)
         except OSError:
             return
-        keep = data[-self.limit_bytes:]
-        cut = keep.find(b"\n")
-        if cut >= 0:
-            keep = keep[cut + 1:]
-        dropped = len(data) - len(keep)
-        marker = f"--- 超出 {self.limit_bytes} 字节上限，已截去较旧的部分（{dropped} 字节） ---\n"
-        _write_atomically(self.path, marker.encode("utf-8") + keep)
+
+    def _keep_from(self, size: int) -> int:
+        """保留段的起始偏移（**落在行首**）。
+
+        起点若落在某一行中间，那一行的残段一并丢掉 —— 半个时间戳比少一行更难读。
+        """
+        edge = size - self.limit_bytes
+        with self.path.open("rb") as handle:
+            handle.seek(edge)
+            window = handle.read(_SCAN_CHUNK)
+        newline = window.find(b"\n")
+        if newline < 0:
+            # 整个窗口里都没有换行（保留段的首行比窗口还长，或尾行被写断）。
+            # 退回按字节切：宁可留一条残行，也不要把内容清空。
+            return edge
+        return edge + newline + 1
+
+    def _rewrite_from(self, start: int, size: int) -> None:
+        """把 `[start, size)` 这段保留下来，前面加一行轮转标记。
+
+        先写临时文件再 `os.replace`（与 `config.save` / `session.json` 同一套做法）：
+        滚动要重写整个文件，中途崩掉会留下一个半截的日志 —— 而日志恰恰是
+        「崩溃之后才来看」的东西。
+        """
+        marker = (f"--- 超出 {self.limit_bytes} 字节上限，"
+                  f"已截去较旧的部分（{start} 字节） ---\n").encode()
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix=".daemon-", suffix=".tmp")
+        try:
+            with self.path.open("rb") as source, os.fdopen(fd, "wb") as target:
+                source.seek(start)
+                target.write(marker)
+                remaining = size - start
+                while remaining > 0:
+                    block = source.read(min(_COPY_CHUNK, remaining))
+                    if not block:
+                        break
+                    target.write(block)
+                    remaining -= len(block)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
 
 def _one_line(text: str) -> str:
@@ -135,21 +200,3 @@ def _one_line(text: str) -> str:
     内容保住了，只是不再是原来的排版。
     """
     return " ".join((text or "").split())
-
-
-def _write_atomically(path: Path, payload: bytes) -> None:
-    """先写临时文件再 `os.replace`（与 `config.save` / `session.json` 同一套做法）。
-
-    滚动是要**重写整个文件**的，中途崩掉会留下一个半截的日志 ——
-    而日志恰恰是「崩溃之后才来看」的东西。
-    """
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".daemon-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise

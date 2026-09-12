@@ -1,13 +1,15 @@
 """daemon 诊断日志（Q-022 / DEC-038）。
 
-oracle: specified —— 上限按 `daemon_log_limit_bytes` **字节**封顶；滚动是**截头保尾**
-（与 `storage.cleanup` 的最旧优先方向刻意相反，日志的价值在最新那几行）；
-日志里绝不出现凭据。
+oracle: specified —— 上限按 `daemon_log_limit_bytes` **字节**封顶（默认 500MiB）；滚动是
+**截头保尾**（与 `storage.cleanup` 的最旧优先方向刻意相反，日志的价值在最新那几行）；
+级别低于 `daemon_log_level`（默认 `info` = 全写）的记录直接丢掉；日志里绝不出现凭据。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 from cu.daemon.log import DaemonLog
 
@@ -107,3 +109,131 @@ def test_write_failure_is_swallowed(tmp_path: Path) -> None:
     log = DaemonLog(blocked, 4096)
 
     log.info("这条写不进去，但不该抛")    # 不抛即通过
+
+
+# ---------------------------------------------------------------------------
+# 级别过滤（`config.daemon_log_level`）
+# ---------------------------------------------------------------------------
+
+
+def test_default_level_is_info_so_nothing_is_dropped(tmp_path: Path) -> None:
+    """默认 `info` = 全写：三个级别都要落盘。"""
+    log = DaemonLog(tmp_path / "daemon.log", 1 << 20)
+
+    log.info("级别 info 的记录")
+    log.warning("级别 warning 的记录")
+    log.error("级别 error 的记录")
+
+    text = log.path.read_text(encoding="utf-8")
+    assert "级别 info 的记录" in text
+    assert "级别 warning 的记录" in text
+    assert "级别 error 的记录" in text
+
+
+def test_warning_threshold_drops_info(tmp_path: Path) -> None:
+    """门槛提到 `warning`：info 丢掉，warning / error 留下。"""
+    log = DaemonLog(tmp_path / "daemon.log", 1 << 20, level="warning")
+
+    log.info("这条不该出现")
+    log.warning("这条要出现")
+    log.error("这条也要出现")
+
+    text = log.path.read_text(encoding="utf-8")
+    assert "这条不该出现" not in text
+    assert "这条要出现" in text
+    assert "这条也要出现" in text
+
+
+def test_error_threshold_drops_everything_below_it(tmp_path: Path) -> None:
+    log = DaemonLog(tmp_path / "daemon.log", 1 << 20, level="error")
+
+    log.info("级别 info 不该落盘")
+    log.warning("级别 warning 也不该落盘")
+    log.error("级别 error 该落盘")
+
+    text = log.path.read_text(encoding="utf-8")
+    assert "级别 info 不该落盘" not in text
+    assert "级别 warning 也不该落盘" not in text
+    assert "级别 error 该落盘" in text
+
+
+def test_filtered_write_creates_no_file(tmp_path: Path) -> None:
+    """被过滤掉就是「什么都没发生」—— 连文件都不该被建出来（否则 `logs/` 目录
+    会因为一条被丢掉的 info 而无端出现）。"""
+    log = DaemonLog(tmp_path / "daemon.log", 1 << 20, level="error")
+
+    log.info("被丢掉")
+
+    assert not log.path.exists()
+
+
+def test_unknown_level_is_never_dropped(tmp_path: Path) -> None:
+    """拼错的级别按**最高**严重度处理 —— 宁可多写一行，也不要静默丢消息。"""
+    log = DaemonLog(tmp_path / "daemon.log", 1 << 20, level="error")
+
+    log.write("verbose", "这个级别不存在，但它不该被吞掉")
+
+    assert "这个级别不存在，但它不该被吞掉" in log.path.read_text(encoding="utf-8")
+
+
+def test_level_names_agree_with_config() -> None:
+    """`daemon/log.py` 与 `cu.config` 各存了一份级别清单 —— 必须一致。
+
+    为什么会有两份：`config` 属于契约层，**不能** import daemon 模块（那会把桌面层
+    拖进 CLI 的冷路径，`test_guards.py` 会红）。所以用这条测试把漂移钉住。
+    """
+    import cu.config as config_mod
+    from cu.daemon import log as log_mod
+
+    assert tuple(config_mod.LOG_LEVELS) == tuple(log_mod.LEVELS)
+    assert config_mod.Config().daemon_log_level in log_mod.LEVELS
+
+
+def test_config_rejects_an_unknown_level() -> None:
+    from cu.config import Config
+    from cu.errors import CUError, ErrorCode
+
+    with pytest.raises(CUError) as info:
+        Config.from_dict({"daemon_log_level": "verbose"})
+    assert info.value.code is ErrorCode.INVALID_PARAMS
+
+
+def test_config_default_log_budget_is_500_mib() -> None:
+    from cu.config import Config
+
+    assert Config().daemon_log_limit_bytes == 500 * 1024**2
+
+
+# ---------------------------------------------------------------------------
+# 滚动的边界
+# ---------------------------------------------------------------------------
+
+
+def test_rotation_handles_a_file_far_larger_than_the_scan_window(tmp_path: Path) -> None:
+    """滚动只扫一小段找行首，但保留段是**整段分块拷贝**的 —— 用一个远大于扫描窗口的
+    上限跑一遍，确认保留段没被截短、也没有把整文件读进内存之外的行为差异。"""
+    limit = 512 * 1024
+    log = DaemonLog(tmp_path / "daemon.log", limit)
+
+    for _ in range(4000):                       # 约 900KB > 512KB 上限
+        log.info("x" * 200)
+
+    text = log.path.read_text(encoding="utf-8")
+    body = [line for line in text.splitlines() if not line.startswith("---")]
+    assert len(body) > 1000, "保留段应当是整整一截，而不是只剩几行"
+    assert all(line.endswith("x" * 200) for line in body)
+    assert log.path.stat().st_size <= limit + 200
+
+
+def test_rotation_of_a_single_oversized_line_keeps_the_log_alive(tmp_path: Path) -> None:
+    """一行就超过上限：留不下完整的一行，但**不能把文件清空** ——
+    那等于「日志自己把自己删了」，比留一条残行糟得多。"""
+    log = DaemonLog(tmp_path / "daemon.log", 200)
+
+    log.info("z" * 5000)
+    log.info("后面的行还在")
+
+    text = log.path.read_text(encoding="utf-8")
+    assert text.strip(), "文件不该被清空"
+    assert "后面的行还在" in text, "滚动之后日志必须还能继续用"
+    assert log.path.stat().st_size <= 200 + 200

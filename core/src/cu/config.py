@@ -6,7 +6,7 @@
 | 字段 | 默认 | 依据 |
 |---|---|---|
 | `storage_limit_bytes` | 1 GiB | DEC-017 / DEC-038（字节上限 + 最旧优先） |
-| `daemon_log_limit_bytes` | 10 MiB | DEC-038 |
+| `daemon_log_limit_bytes` / `daemon_log_level` | 500 MiB / info | DEC-038 / DEC-053（截头保尾；级别过滤，info = 全写） |
 | `lock_wait_seconds` | 10 | DEC-022 |
 | `overlay_arm_ms` | 500 | DEC-045（原 1500，缩短后仍够「让手离开」） |
 | `overlay_hold_seconds` | 30 | DEC-045（兜底阈值；正常由 `--continue` 决定） |
@@ -29,6 +29,11 @@ from .errors import CUError, ErrorCode
 
 DEFAULT_DATA_DIR_NAME = ".computer-use"
 SCHEMA_VERSION = 1
+
+#: daemon 日志的合法级别（由低到高）。**必须与 `daemon/log.py` 的 `LEVELS` 一致** ——
+#: 两者分居契约层与 daemon 层（config 不能 import daemon：那会把桌面层拖进 CLI 冷路径），
+#: 所以这份清单写了两处，由 `tests/unit/test_daemon_log.py` 断言它们相同。
+LOG_LEVELS: tuple[str, ...] = ("info", "warning", "error")
 
 #: 危险键序列黑名单（DEC-019）。命中则拒绝执行，需 `--force` 越过。
 #: 注：Ctrl+Alt+Del 是系统安全注意序列，任何用户态钩子都拦不住，这里记录它是为了
@@ -72,7 +77,9 @@ class Config:
     data_dir: str = ""                       # 留空表示 default_data_dir()
 
     storage_limit_bytes: int = 1 * 1024**3
-    daemon_log_limit_bytes: int = 10 * 1024**2
+    daemon_log_limit_bytes: int = 500 * 1024**2
+    #: daemon 日志的级别下限：低于它的记录直接丢掉。默认 `info` = 全都写。
+    daemon_log_level: str = "info"
     lock_wait_seconds: int = 10
     overlay_arm_ms: int = 500
     #: 兜底保持阈值。**正常情况下不用它** —— 调用方用 `--continue` 显式续期（DEC-045），
@@ -136,6 +143,8 @@ class Config:
         need(self.schema == SCHEMA_VERSION, f"schema 应为 {SCHEMA_VERSION}，实际 {self.schema}")
         need(self.storage_limit_bytes > 0, "storage_limit_bytes 必须为正")
         need(self.daemon_log_limit_bytes > 0, "daemon_log_limit_bytes 必须为正")
+        need(self.daemon_log_level in LOG_LEVELS,
+             f"daemon_log_level 只能是 {'/'.join(LOG_LEVELS)}，实际 {self.daemon_log_level!r}")
         need(self.lock_wait_seconds >= 0, "lock_wait_seconds 不能为负")
         need(self.overlay_arm_ms >= 0, "overlay_arm_ms 不能为负")
         need(self.overlay_hold_seconds >= 0, "overlay_hold_seconds 不能为负")
@@ -213,6 +222,7 @@ class Config:
 SETTABLE_KEYS: dict[str, str] = {
     "storage_limit_bytes": "int",
     "daemon_log_limit_bytes": "int",
+    "daemon_log_level": "str",
     "lock_wait_seconds": "int",
     "overlay_arm_ms": "int",
     "overlay_hold_seconds": "int",

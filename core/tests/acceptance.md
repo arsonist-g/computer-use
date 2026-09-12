@@ -270,4 +270,3 @@ F7b / F8 / F9）；剩下 5 条（F1 / F4 / F5 / F10 / F11）于同日处置完�
   `tests/native/acceptance_preflight.py`（**新增**，§2.3 写操作前置的期望身份）**四条全过** ·
   `acceptance_lifecycle.py` §5 **十三项全过**（含 §5.2b 断言翻面、§F1、§F11）·
   `acceptance_omni_extra.py --only 7.7` 通过（错误码改从 **stdout** 读）
-- 结论人：________
