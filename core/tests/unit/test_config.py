@@ -62,6 +62,7 @@ CONTRACT_SETTABLE_KEYS = {
     "vlm.base_url",
     "vlm.api_key",
     "vlm.model_name",
+    "vlm.user_agent",
     "omni.env_path",
     "omni.weights_dir",
     "omni.mirror",
@@ -257,7 +258,7 @@ def test_from_dict_builds_nested_vlm_and_ignores_unknown_subkeys() -> None:
     assert cfg.vlm.base_url == "http://example.invalid/v1"
     assert cfg.vlm.api_key == "k"
     assert cfg.vlm.model_name == ""
-    assert set(cfg.to_dict()["vlm"]) == {"base_url", "api_key", "model_name"}
+    assert set(cfg.to_dict()["vlm"]) == {"base_url", "api_key", "model_name", "user_agent"}
 
 
 def test_from_dict_builds_nested_omni_and_ignores_unknown_subkeys() -> None:
@@ -407,10 +408,10 @@ def test_load_rejects_non_object_root(tmp_path: Path) -> None:
 
 
 def test_settable_keys_whitelist_is_exact() -> None:
-    # oracle: specified —— 领域规则：白名单（含 3 vlm.* / 3 omni.*）。
-    # 16 项是 DEC-045 之后的数量（新增 overlay_exit_hold_ms）。
+    # oracle: specified —— 领域规则：白名单（含 4 vlm.* / 3 omni.*）。
+    # 17 项是 DEC-045 与 vlm.user_agent 之后的数量。
     assert set(SETTABLE_KEYS) == CONTRACT_SETTABLE_KEYS
-    assert len(SETTABLE_KEYS) == 16
+    assert len(SETTABLE_KEYS) == 17
 
 
 def test_settable_keys_excludes_data_dir() -> None:

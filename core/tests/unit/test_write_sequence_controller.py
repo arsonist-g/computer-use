@@ -158,11 +158,6 @@ def test_exit_hold_first_tick_removes_overlay_but_keeps_blocking(ctrl) -> None:
     assert controller._exit_release_at is not None
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="缺陷：tick 顶部的 `not self.overlay.visible` 守卫在撤下覆盖层后立即返回，"
-           "使保留期结束后的解封分支不可达 —— 输入会一直保持封锁（见交付报告）。",
-)
 def test_exit_hold_releases_after_deadline(ctrl) -> None:
     controller, clock = ctrl
     controller.begin_write(arm_ms=500, hold_seconds=1000, keep_alive=True)

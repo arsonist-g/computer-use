@@ -166,11 +166,19 @@ def _merge_uia(detector: list, uia: list) -> list:
     会变），而现在变成「UIA 有就用它，没有就退回检测器」，逻辑单一且不会因匹配失败
     而静默退化。
 
-    `inner` 的判定：检测器元素若与**任一** UIA 元素重叠超过阈值，就认为 UIA 已经覆盖了
-    这块区域，丢弃它；否则保留 —— 那正是 UIA 拿不到的东西（自绘部件、画布内容）。
+    检测器元素若与**任一** UIA 元素重叠超过阈值，就认为 UIA 已经覆盖了这块区域，
+    丢弃它；否则保留 —— 那正是 UIA 拿不到的东西（自绘部件、画布内容）。
+    `uia` 为空时是**纯退回**：检测器产出逐项原样返回，连 `source` 都不改 ——
+    那是 Electron/自绘界面的正常路径，什么都不该被动过。
+    `uia` 非空时才是**合并**：这时留下的检测器元素标 `source="detector"`，
+    好与 `uia` 区分开（一张表里两个来源，不标就无从判断哪条该信）。
+
+    两侧的输入都要容错：非 dict、bbox 缺失或形状不对的条目一律跳过。
+    这是纯函数，调用方不止一处，一条坏数据不该让整次解析失败。
     """
     if not uia:
-        return [dict(item) for item in detector]
+        # 纯退回：原样复制，不校验也不补字段（校验留给真正的合并路径）。
+        return [dict(item) for item in detector if isinstance(item, dict)]
 
     def rect_of(box) -> tuple | None:
         if not (isinstance(box, (list, tuple)) and len(box) == 4):
@@ -194,11 +202,17 @@ def _merge_uia(detector: list, uia: list) -> list:
     } for e in uia if isinstance(e, dict) and rect_of(e.get("bbox"))]
 
     for item in detector:
+        # 检测器侧的输入同样可能不是 dict（这个函数是纯函数，调用方不止一处）。
+        # 委派契约要求「非 dict 不崩」，而且**不要**在这里抛 —— 一条坏数据不该
+        # 让整次解析失败。
+        if not isinstance(item, dict):
+            continue
         rect = rect_of(item.get("bbox"))
         if rect is None:
             continue
         if any(_overlap_ratio(rect, other) >= _MATCH_THRESHOLD for other in uia_rects):
-            continue          # UIA 已覆盖这块区域，它的文本更可信
+            continue          # UIA 已覆盖这块区域，它的文本与框都更可信
+        # 这是合并路径：标出来源，否则读的人分不清哪条来自哪一侧。
         merged.append({**item, "source": item.get("source") or "detector"})
 
     return merged

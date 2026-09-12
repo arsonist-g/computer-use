@@ -24,8 +24,6 @@ import copy
 import importlib.util
 from pathlib import Path
 
-import pytest
-
 #: 仓库根下的 omni/worker.py。unit 目录的上溯：unit → tests → core → 仓库根。
 WORKER_PATH = Path(__file__).resolve().parents[3] / "omni" / "worker.py"
 
@@ -175,7 +173,8 @@ def test_empty_uia_returns_detector_elements_unchanged() -> None:
     assert result == detector
     # oracle: derived —— 返回的是新列表与浅拷贝，不与输入共享对象。
     assert result is not detector
-    assert all(copied is not original for copied, original in zip(result, detector))
+    assert all(copied is not original
+               for copied, original in zip(result, detector, strict=True))
     # oracle: derived —— 原输入不被改动。
     assert detector[0]["source"] == "omni"
 
@@ -234,17 +233,12 @@ def test_merge_does_not_mutate_inputs() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="缺陷：_merge_uia 对检测器侧的非法项按 item.get('bbox') 取框，"
-           "非 dict 项会抛 AttributeError（UIA 为空时是 dict(item) 抛 TypeError）。",
-)
 def test_non_dict_detector_entries_do_not_crash() -> None:
     """契约要求「非 dict 的输入不崩」，但检测器侧目前会崩。
 
     UIA 侧用 ``isinstance(e, dict)`` 守住了，检测器侧没有。当前内部调用方
     （``handle_parse`` ← ``_to_elements``）保证是 dict，所以这一条在真实链路上
-    还触发不到；但它与 UIA 侧的容错不对称，且契约明确要求不崩。以 xfail 钉住。
+    行为与 UIA 侧一致 —— 非 dict 一律跳过。
     """
     # oracle: specified —— 契约：非 dict 输入不崩，且不产出垃圾。
     result_with_uia = worker._merge_uia(["x", 7, _detector(bbox=[300, 300, 340, 340])],

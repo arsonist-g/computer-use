@@ -115,7 +115,11 @@ def main() -> int:
     if code != 0:
         record("T3 基线解析（无 --ai）", False, f"exit={code} {err[:300]}")
         return 1
-    base_name = re.match(r"^(?P<n>.+?)\s+elements=(?P<c>\d+)\s*$", out).group("n").strip()
+    base_match = re.match(r"^(?P<n>.+?)\s+elements=(?P<c>\d+)", out)
+    if base_match is None:
+        record("T3 基线解析（无 --ai）", False, f"输出无法解析：{out[:300]}")
+        return 1
+    base_name = base_match.group("n").strip()
     base_rows = parse_md(sessions_root / base_name)
     record("T3 基线解析（无 --ai）", bool(base_rows),
            f"耗时 {base_secs:.0f}s · 元素 {len(base_rows)} 个 · {base_name[:60]}")
@@ -133,7 +137,15 @@ def main() -> int:
         _summary()
         return 1
 
-    ai_name = re.match(r"^(?P<n>.+?)\s+elements=(?P<c>\d+)\s*$", out).group("n").strip()
+    matched = re.match(r"^(?P<n>.+?)\s+elements=(?P<c>\d+)", out)
+    if matched is None:
+        record("T4 --ai 优化", False,
+               f"命令成功但输出无法解析（耗时 {ai_secs:.0f}s）。原始输出："
+               + out[:400].replace(chr(10), " / "))
+        cu("session", "end", "--session", session_id)
+        cu("daemon", "stop")
+        return _summary()
+    ai_name = matched.group("n").strip()
     ai_rows = parse_md(sessions_root / ai_name)
     record("T4 --ai 优化", bool(ai_rows),
            f"耗时 {ai_secs:.0f}s（比基线多 {ai_secs - base_secs:.0f}s）· "

@@ -176,25 +176,37 @@ class WriteSequenceController:
         为什么加这一段：解除封锁的瞬间，如果用户正好在按物理键或移动鼠标，
         那一下会落在他没预期的地方。概率极低，但代价是「工具在我手里乱动」，
         不值得赌。0.5s 的等待，人感觉不出来，却把那个窗口关掉了。
+
+        **顺序在这里很要紧**：保留期的判定必须在「覆盖层是否可见」**之前**。
+        退场的第一件事就是把覆盖层转 OFF，于是 `visible` 变成假 —— 若先判 `visible`
+        就直接返回，解封那一步**永远不可达**，输入会被一直封着。
+        （这个次序错误被 `test_exit_hold_releases_after_deadline` 钉住过。）
         """
         with self._lock:
-            if not self.overlay.visible or self.overlay.state is OverlayState.ERROR:
-                return
             if self._aborted.is_set():
                 self.overlay.transition(OverlayState.OFF)
                 self.blocker.set_blocking(False)
                 self._hold_until = 0.0
+                self._exit_release_at = None
                 return
-            if time.monotonic() < self._hold_until:
-                return
-            # 保持窗口已过：先撤覆盖层，再等保留期，最后解封。
-            if self._exit_release_at is None:
-                self.overlay.transition(OverlayState.OFF)
-                self._exit_release_at = time.monotonic() + exit_hold_ms / 1000.0
-                if exit_hold_ms <= 0:
+
+            # ① 已在保留期内：只看时间，不看可见性（见 docstring 的次序说明）。
+            if self._exit_release_at is not None:
+                if time.monotonic() >= self._exit_release_at:
                     self._release_after_exit()
                 return
-            if time.monotonic() >= self._exit_release_at:
+
+            if not self.overlay.visible or self.overlay.state is OverlayState.ERROR:
+                return
+
+            # ② 保持窗口未过：什么都不做。
+            if time.monotonic() < self._hold_until:
+                return
+
+            # ③ 保持窗口已过：撤覆盖层，进入保留期。
+            self.overlay.transition(OverlayState.OFF)
+            self._exit_release_at = time.monotonic() + exit_hold_ms / 1000.0
+            if exit_hold_ms <= 0:
                 self._release_after_exit()
 
     def _release_after_exit(self) -> None:
