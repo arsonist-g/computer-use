@@ -578,7 +578,8 @@ class ControlOverlay:
         self._screen: _Screen | None = None
         self._text: _TextRenderer | None = None
         self._state = OverlayState.OFF
-        self._state_since = 0.0
+        #: 光谱相位的时间原点。**刻意不随状态切换重置** —— 见 `_phase()`。
+        self._phase_origin = time.monotonic()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._target_rect: tuple[int, int, int, int] | None = None
@@ -606,10 +607,25 @@ class ControlOverlay:
         return self._last_error
 
     def transition(self, state: OverlayState) -> None:
+        """切换状态。**只写状态** —— 渲染交给渲染线程（见模块文档）。
+
+        这里刻意不动光谱相位：相位是一个连续时钟，不是「本状态已持续多久」。
+        从它起算的话，Arming → Active 会把光谱归零重来 —— 两态现在是同一条
+        连续的光谱，视觉上读作「闪了一下重新开始」，很扎眼。
+        """
         if state == self._state:
             return
         self._state = state
-        self._state_since = time.monotonic()
+
+    def _phase(self) -> float:
+        """光谱相位（0..1）。跨状态、跨显示周期**连续递增**。
+
+        它是**一个单调时钟**除以一圈时长，而不是「进入本状态的时刻」的函数 ——
+        后者在每次状态切换时归零，而流速统一（DEC-047）之后两态本应读作同一条
+        在流动的光谱。若将来重新引入「武装期快流」，这里要改成相位累积，
+        否则切换点会跳变。
+        """
+        return ((time.monotonic() - self._phase_origin) / _SPIN_SECONDS) % 1.0
 
     def set_target(self, rect: tuple[int, int, int, int] | None) -> None:
         """目标元素高亮框。**只在 Active 显示** —— 出错或中止时 AI 已不在操作任何元素。"""
@@ -747,8 +763,7 @@ class ControlOverlay:
         光谱的旋转相位 —— 只冻相位的话，屏幕上仍是一片彩色，只是不流动了。
         """
         frozen = _FROZEN_HUE.get(state)
-        angle0 = 0.0 if frozen is not None else (
-            (time.monotonic() - self._state_since) / _SPIN_SECONDS % 1.0)
+        angle0 = self._phase()
         frozen_rgb = None
         if frozen is not None:
             red, green, blue = colorsys.hsv_to_rgb(frozen, 0.85, 1.0)

@@ -358,7 +358,6 @@ def t7_target_ring() -> None:
     overlay = ControlOverlay()
     overlay._screen = _read_screen()
     overlay._state = OverlayState.ACTIVE
-    overlay._state_since = time.monotonic()
     target = (900, 600, 400, 300)
     overlay.set_target(target)
     detail = overlay._build_target(overlay._screen)
@@ -402,7 +401,6 @@ def t8_glow_is_at_edges() -> None:
     overlay = ControlOverlay()
     overlay._screen = _read_screen()
     overlay._state = OverlayState.ACTIVE
-    overlay._state_since = time.monotonic()
     glow = overlay._build_glow(overlay._screen, width, height, OverlayState.ACTIVE)
     reach = max(6.0, min(width, height) * _REACH_RATIO)
 
@@ -495,7 +493,6 @@ def t10_frozen_states_are_single_hue() -> None:
 
     def hue_bins(state) -> int:
         overlay._state = state
-        overlay._state_since = time.monotonic()
         glow = overlay._build_glow(screen, 240, 100, state)
         bins = set()
         for index in range(0, len(glow), 4):
@@ -525,6 +522,35 @@ def t10_frozen_states_are_single_hue() -> None:
         all(count <= 1 for count in frozen.values())
         and all(count >= 6 for count in flowing.values()),
         f"冻结态色相箱数 {frozen}（期望各 ≤1）· 流动态色相箱数 {flowing}（期望各 ≥6）",
+    )
+
+
+def t11_spectrum_phase_is_continuous() -> None:
+    """光谱相位必须**跨状态切换连续**，不能在切换点归零重来。
+
+    这条守卫来自一次真机验收的观感反馈：Arming → Active 时「并没有顺利过渡，
+    而是重开了一个流动」。根因是相位从「进入本状态的时刻」起算，而 `transition()`
+    会更新那个时刻 —— 于是每次切换都把光谱归零。两态流速统一（DEC-047）之后
+    它们本应读作同一条连续流动的光谱，突然回到起点就很扎眼。
+
+    判据：先把相位推到非零，再切一次状态，前后的相位差必须是「这一瞬间的
+    正常推进量」，而不是一个跳变。
+    """
+    from cu.desktop.overlay import ControlOverlay, OverlayState  # noqa: PLC0415
+
+    overlay = ControlOverlay()
+    # 把时钟原点往前拨 3 秒 —— 这样相位约 0.43，任何归零都会立刻显形。
+    overlay._phase_origin = time.monotonic() - 3.0
+    before = overlay._phase()
+    overlay.transition(OverlayState.ARMING)
+    overlay.transition(OverlayState.ACTIVE)
+    after = overlay._phase()
+    jump = min((after - before) % 1.0, (before - after) % 1.0)
+    record(
+        "T11 光谱相位跨状态连续（不归零重来）",
+        jump < 0.05,
+        f"切换前后相位 {before:.3f} -> {after:.3f}（差 {jump:.3f}，期望 <0.05）· "
+        f"归零的话这里会是一个大跳变",
     )
 
 
@@ -579,6 +605,7 @@ def main() -> int:
     t7_target_ring()
     t8_glow_is_at_edges()
     t10_frozen_states_are_single_hue()
+    t11_spectrum_phase_is_continuous()
     t9_overlay_window_does_not_hang()
     if args.blocking:
         t5_blocking()
