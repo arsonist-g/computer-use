@@ -106,8 +106,12 @@ def test_begin_write_arms_and_blocks_from_first_frame(ctrl) -> None:
     controller.begin_write(arm_ms=500, hold_seconds=5)
     # oracle: specified —— 前摇期间就封锁输入（overlay.md §2.2：不封锁等于没有前摇）。
     assert controller.blocker.blocking is True
-    # oracle: specified —— 进入 Arming 态。
-    assert controller.overlay.state is OverlayState.ARMING
+    # oracle: specified —— 覆盖层直接进 Active。前摇是一个**计时**概念（`_armed_at`），
+    # 不是一种要画出来的样子：它与 Active 的光谱、胶囊文案、色相完全一致，
+    # 单设一个状态只会让「切换」凭空多出来一次（而每次切换都要重建胶囊与目标框）。
+    # 前摇本身仍然存在 —— `armed()` 在 500ms 内为假，见下面那条断言。
+    assert controller.overlay.state is OverlayState.ACTIVE
+    assert controller.armed(arm_ms=500) is False
 
 
 def test_keep_alive_ignores_hold_threshold(ctrl) -> None:

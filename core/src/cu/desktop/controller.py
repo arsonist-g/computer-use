@@ -5,9 +5,15 @@
 只要它们分处两个进程，「锁已释放但输入还被封锁」这个窗口就存在，
 而那个窗口的后果是把用户锁在电脑外。
 
-状态机（overlay.md §2）：
+状态机（overlay.md §2 及其 Delta）：
 
-    Off → Arming（1.5s 前摇，**从第一帧起就封锁输入**）→ Active → Stopping/Error → Off
+    Off → Active（**从第一帧起就封锁输入**，前摇只是「还没有派发输入」的一段计时）
+        → Stopping/Error → Off
+
+**没有独立的「武装期」状态**：前摇是一个计时概念（`_armed_at` / `wait_for_arm`），
+不是一种要画出来的样子 —— 它与 Active 的光谱、胶囊文案、色相完全一致。单独留一个
+状态只会让「切换」凭空多出来一次，而每次切换都要重建胶囊与目标框（实测那一帧 392ms，
+正常帧 43ms），观感就是光谱流动卡一下。
 
 关键取舍：**前摇的粒度是「每次写序列一次」，不是每条写命令一次**（DEC-030）。
 否则一次 20 步的任务要多等 30~40 秒。连续写操作之间若间隔小于保持阈值，
@@ -85,13 +91,14 @@ class WriteSequenceController:
 
     def begin_write(self, arm_ms: int, hold_seconds: float, *,
                     keep_alive: bool = False) -> None:
-        """一条写命令开始。首次（或上一条没说要继续）才走前摇。
+        """一条写命令开始。首次（或上一条没说要继续）才起前摇。
 
         **前摇期间就封锁输入**（overlay.md §2.2）：前摇的全部意义是给用户反应时间，
-        此时不封锁等于没有前摇。
+        此时不封锁等于没有前摇。但覆盖层直接进 Active —— 前摇与 Active 长得一模一样，
+        没有理由为它单设一个要画出来的状态（见模块文档）。
 
         `keep_alive=True`（来自 `--continue`）表示调用方明确要接着操作：
-        覆盖层与封锁都保持，不再重新武装。这是 DEC-045 的核心 ——
+        覆盖层与封锁都保持，不再重新起前摇。这是 DEC-045 的核心 ——
         阈值是个**猜**（下一条命令什么时候来，事先不知道），而调用方知道，
         所以把这个判断交给它。
         """
@@ -104,17 +111,11 @@ class WriteSequenceController:
             # 显式续期优先：调用方说了要连续操作，就不看阈值。
             self._hold_until = now + (hold_seconds if not keep_alive else _KEEP_ALIVE_SECONDS)
             if self.overlay.visible:
-                return                # 仍在保持窗口内：不重新武装，输入保持封锁
+                return                # 仍在保持窗口内：不重新起前摇，输入保持封锁
             self._armed_at = now
-            self.overlay.transition(OverlayState.ARMING)
-            # 从 Arming 的第一帧起封锁。
+            self.overlay.transition(OverlayState.ACTIVE)
+            # 从覆盖层出现的第一帧起封锁。
             self.blocker.set_blocking(True)
-
-    def finish_arming(self) -> None:
-        """前摇时间到 —— 进入 Active（如果还在武装中）。"""
-        with self._lock:
-            if self.overlay.state is OverlayState.ARMING:
-                self.overlay.transition(OverlayState.ACTIVE)
 
     def armed(self, arm_ms: int) -> bool:
         """前摇是否已经走完。写命令在前摇结束前不应该真的派发输入。"""
@@ -129,7 +130,6 @@ class WriteSequenceController:
             if self._aborted.is_set():
                 raise _aborted_error("用户在前摇期间按下了 Esc")
             time.sleep(0.02)
-        self.finish_arming()
 
     def note_error(self) -> None:
         """写操作失败 —— 光谱冻结为红，等用户按 Esc 关闭（DEC-030）。"""

@@ -175,7 +175,6 @@ def section1() -> None:
                else "第二次 Esc 失效")
 
     # ---- 1.3 注入输入在封锁期间被放行 ----
-    # ---- 1.3 注入输入在封锁期间被放行 ----
     if selected("1.3"):
         say("\n  【1.3】封锁 4 秒，期间由**脚本注入**按键（F24，无副作用）。")
         say("        注入应当被放行 —— 否则 AI 自己的输入会被自己吞掉。")
@@ -344,17 +343,15 @@ def section4() -> None:
                    else "光晕不可见或系统光标异常")
 
         def check_4_4() -> None:
-            say("\n  【4.4】逐个显示四个状态，每态 8 秒。对照 overlay.md §2.1（含 Delta）：")
-            say("        arming   -> 流动光谱 / 胶囊: AI is using your computer · [Esc] to cancel")
-            say("        active   -> 流动光谱（**与 arming 同速、同一条连续流动**）")
-            say("                    / 同胶囊 / 琥珀目标框 / 光标光晕")
+            say("\n  【4.4】逐个显示三个状态，每态 8 秒。对照 overlay.md §2.1（含 Delta）：")
+            say("        active   -> 流动光谱 / 胶囊: AI is using your computer · [Esc] to cancel")
+            say("                    / 琥珀目标框 / 光标光晕")
             say("        stopping -> **冻结成单一琥珀** / 胶囊: Stopping")
             say("        error    -> **冻结成单一红色** / 胶囊: Something went wrong · [Esc] to dismiss")
-            say("        注意切换时的观感：arming -> active 光谱应当**接着往下流**，")
-            say("        不能跳回起点重开（两态现在是同一条光谱，见 DEC-047）。")
+            say("        注意：**没有独立的「武装期」样子** —— 前摇与 Active 完全同相")
+            say("        （同文案、同色相、同流速），所以它不再是一个要画出来的状态。")
             for state, note in (
-                (OverlayState.ARMING, "流动光谱"),
-                (OverlayState.ACTIVE, "流动光谱（应接着上一段的相位，不重开）+ 琥珀目标框"),
+                (OverlayState.ACTIVE, "流动光谱 + 琥珀目标框 + 光标光晕"),
                 (OverlayState.STOPPING, "冻结单一琥珀（**不是**彩色的、只是不动的光谱）+ Stopping"),
                 (OverlayState.ERROR, "冻结单一红 + Something went wrong"),
             ):
@@ -362,9 +359,9 @@ def section4() -> None:
                 show(state, 8.0, target=(900, 600, 400, 300), cursor=(1700, 700))
             overlay.transition(OverlayState.OFF)
             time.sleep(0.4)
-            answer = ask("四态的胶囊文案与光谱颜色都对吗？（arming→active 有没有跳变？）")
+            answer = ask("三态的胶囊文案与光谱颜色都对吗？")
             record("4.4", "通过" if answer.startswith("y") else "失败",
-                   "四态文案与光谱符合 overlay.md §2.1 及其 Delta" if answer.startswith("y")
+                   "三态文案与光谱符合 overlay.md §2.1 及其 Delta" if answer.startswith("y")
                    else "与规范不符")
 
         def check_4_5() -> None:
@@ -377,17 +374,14 @@ def section4() -> None:
                    else "能看出边界或内边界")
 
         def check_4_6() -> None:
-            say("\n  【4.6】arming 8 秒 -> 切 OFF -> active 16 秒（两态**同为 7s 一圈**，DEC-047）。")
-            say("        关键：**颜色有没有在动**。DEC-031 第 7 轮踩过这个坑，光谱曾根本不流动。")
-            say("        顺带看第二件：arming 与 active 的流速应当**看不出差别**。")
-            show(OverlayState.ARMING, 8.0)
-            overlay.transition(OverlayState.OFF)
-            time.sleep(0.3)
+            say("\n  【4.6】显示 Active 16 秒，看光谱**有没有在流动**、速度约 7s 一圈。")
+            say("        DEC-031 第 7 轮踩过这个坑：光谱曾经根本不流动（四个角的颜色是固定的）。")
+            say("        只有一种流速了（DEC-047），所以不必再比较两态的差别。")
             show(OverlayState.ACTIVE, 16.0)
-            answer = ask("光谱在流动吗？两态速度一致、约 7s 一圈吗？")
+            answer = ask("光谱在流动吗？约 7s 一圈吗？")
             record("4.6", "通过" if answer.startswith("y") else "失败",
-                   "光谱在流动、两态同速（DEC-047）" if answer.startswith("y")
-                   else "未流动或两态速度不一致")
+                   "光谱在流动、约 7s 一圈" if answer.startswith("y")
+                   else "未流动或速度明显不符")
             overlay.transition(OverlayState.OFF)
 
         def check_4_2() -> None:
@@ -417,10 +411,33 @@ def section4() -> None:
         def check_4_8() -> None:
             record("4.8", "不适用", "本机只有一台显示器，1080p/4K 对照无法做")
 
+        def check_4_10() -> None:
+            say("\n  【4.10】状态切换时画面**不该卡顿**、光谱也不该跳回起点。")
+            say("        背景：切换那一帧要重建胶囊与目标框，而帧预算只有 83ms；")
+            say("        重建一次胶囊约 280ms —— 超出的部分就是肉眼看到的「卡一下」")
+            say("        （实测切换后那一帧 392ms，正常帧 43ms）。胶囊现在按内容缓存、")
+            say("        并在**不可见时**先画好，所以切换不该再有停顿。")
+            say("        接下来切换几次，请盯住流动的光谱，看切换的**那一瞬间**：")
+            overlay.transition(OverlayState.OFF)
+            time.sleep(0.8)
+            say("        —— OFF → Active（覆盖层出现）")
+            show(OverlayState.ACTIVE, 8.0, target=(900, 600, 400, 300), cursor=(1700, 700))
+            say("        —— Active → Stopping")
+            show(OverlayState.STOPPING, 5.0)
+            say("        —— Stopping → Error")
+            show(OverlayState.ERROR, 5.0)
+            overlay.transition(OverlayState.OFF)
+            time.sleep(0.3)
+            answer = ask("切换的那一瞬间，光谱有没有顿一下、或者颜色跳回起点？")
+            record("4.10", "通过" if answer.startswith("n") else "失败",
+                   "切换时画面连续，无卡顿、无相位跳变" if answer.startswith("n")
+                   else "切换时出现卡顿或相位跳变")
+
         # 顺序即阅读顺序，不是依赖顺序 —— 每个 check 自己把覆盖层摆到它要的状态。
         for item, check in (
             ("4.9", check_4_9),
             ("4.4", check_4_4),
+            ("4.10", check_4_10),
             ("4.5", check_4_5),
             ("4.6", check_4_6),
             ("4.2", check_4_2),
@@ -445,7 +462,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="引导式人眼验收（需要真人坐在机器前）",
         epilog="可用条目：§1 的 1.1a 1.1b 1.2 1.3 1.4 1.5；"
-               "§4 的 4.0 4.2 4.3 4.4 4.5 4.6 4.7 4.8 4.9。")
+               "§4 的 4.0 4.2 4.3 4.4 4.5 4.6 4.7 4.8 4.9 4.10。")
     parser.add_argument(
         "--section", default=None,
         help="要跑的节：1 / 4 / 1,4。默认按 --item 推断；都没给就跑 1,4。")
@@ -460,7 +477,7 @@ def main() -> int:
 
     if args.list:
         print("§1: 1.1a 1.1b 1.2 1.3 1.4 1.5")
-        print("§4: 4.0 4.2 4.3 4.4 4.5 4.6 4.7 4.8 4.9")
+        print("§4: 4.0 4.2 4.3 4.4 4.5 4.6 4.7 4.8 4.9 4.10")
         return 0
 
     if args.item:

@@ -51,8 +51,15 @@ from . import win32 as w
 
 
 class OverlayState(StrEnum):
+    """覆盖层的可见状态。
+
+    **没有「武装期」这个状态。** 前摇（DEC-045 的 500ms）是一个**计时**概念，
+    由控制器用 `_armed_at` 记着，不是一种要画出来的样子：它与 Active 的光谱、
+    胶囊文案、色相完全一致，单独留一个状态只会让「切换」这件事凭空多出来一次
+    —— 而每次切换都要重建胶囊与目标框，那是一帧几百毫秒的卡顿。
+    """
+
     OFF = "off"
-    ARMING = "arming"
     ACTIVE = "active"
     STOPPING = "stopping"
     ERROR = "error"
@@ -125,18 +132,16 @@ _CURSOR_COLOR = (255, 255, 255)
 
 #: 胶囊内容：`(主文案, 键名, 尾文案)`。键名为 None 时不画键帽。
 #: 完整文案（供对照 overlay.md §2.1 的状态表）：
-#:   Arming / Active  `● AI is using your computer · [Esc] to cancel`
-#:   Stopping         `● Stopping`
-#:   Error            `● Something went wrong · [Esc] to dismiss`
+#:   Active    `● AI is using your computer · [Esc] to cancel`
+#:   Stopping  `● Stopping`
+#:   Error     `● Something went wrong · [Esc] to dismiss`
 _PILL_CONTENT = {
-    OverlayState.ARMING: ("AI is using your computer", "Esc", "to cancel"),
     OverlayState.ACTIVE: ("AI is using your computer", "Esc", "to cancel"),
     OverlayState.STOPPING: ("Stopping", None, None),
     OverlayState.ERROR: ("Something went wrong", "Esc", "to dismiss"),
 }
 #: 圆点色相（`--state-hue`）。Stopping 用暂停色，Error 用错误色。
 _PILL_HUE = {
-    OverlayState.ARMING: 0.12,
     OverlayState.ACTIVE: 0.12,
     OverlayState.STOPPING: 0.09,
     OverlayState.ERROR: 0.0,
@@ -587,8 +592,12 @@ class ControlOverlay:
         self._ready = threading.Event()
         self._last_error: BaseException | None = None
         self._error_logged = False
-        #: 细节表面的内容签名 —— 内容没变就不重画（胶囊要跑 GDI 量字，不便宜）。
+        #: 细节表面的内容签名 —— 内容没变就不重画（胶囊要跑 GDI 量字 + 两层柔影的
+        #: 模糊，约 280ms，而帧预算只有 83ms）。
         self._details: dict[str, tuple[object, _Detail]] = {}
+        #: 胶囊按**内容**缓存（不是按状态）—— 见 `_pill_signature()`。
+        self._pill_cache: dict[object, _Detail] = {}
+        self._pill_shown: object | None = None
 
     # ---- 状态机（任意线程可调用，只写状态） ----
 
@@ -685,6 +694,9 @@ class ControlOverlay:
             state = self._state
             if state is OverlayState.OFF:
                 self._hide_all()
+                # 不可见时把还没画过的胶囊先画出来 —— 那笔开销（~280ms）在可见时
+                # 付就是一次卡顿，在这里付没人看得见。见 `_prewarm()`。
+                self._prewarm(self._screen_now())
                 return
             screen = self._screen_now()
             self._sync_glow(screen, state)
@@ -713,9 +725,27 @@ class ControlOverlay:
                   file=sys.stderr, flush=True)
 
     def _hide_all(self) -> None:
+        """全部撤下。**不清内容缓存** —— 缓存按内容+屏幕签名索引，重新显示时
+        只要内容没变就直接复用，省掉一次重建。"""
         for surface in self._surfaces:
             surface.hide()
-        self._details.clear()
+        self._pill_shown = None
+
+    def _prewarm(self, screen: _Screen) -> None:
+        """空闲（覆盖层不可见）时，把还没画过的胶囊先画出来，一帧只画一个。
+
+        为什么需要它：状态切换那一帧要同步重建胶囊，而重建一次约 280ms ——
+        远超 83ms 的帧预算，观感就是光谱流动**卡了一下**（实测切换后那一帧 392ms，
+        正常帧 43ms）。胶囊一共只有三种内容，在不可见时画掉，这笔钱就永远
+        不出现在可见的那一帧里。
+
+        一帧只画一个：一次画三个会把这一帧也拖长，虽然不可见，但没有理由。
+        """
+        for state in _PILL_CONTENT:
+            signature = _pill_signature(state, screen)
+            if signature not in self._pill_cache:
+                self._pill_cache[signature] = self._build_pill(screen, state)
+                return
 
     def _destroy_all(self) -> None:
         for surface in self._surfaces:
@@ -730,6 +760,8 @@ class ControlOverlay:
                 pass
             self._text = None
         self._details.clear()
+        self._pill_cache.clear()
+        self._pill_shown = None
 
     def _screen_now(self) -> _Screen:
         if self._screen is None:
@@ -816,24 +848,46 @@ class ControlOverlay:
 
     def _sync_detail(self, surface: _LayeredSurface, name: str, signature,
                      build) -> bool:
-        """同步一个小表面。返回本帧是否重新上屏了（用于维护 z 序）。"""
-        cached = self._details.get(name)
-        if cached is not None and cached[0] == signature and surface.shown:
-            return False
-        detail = build()
-        if detail is None:
+        """同步一个小表面。返回本帧是否重新上屏了（用于维护 z 序）。
+
+        内容没变时**复用已经画好的缓冲**，只在需要重新显示时把它重新上屏
+        （一次 memmove + 一次 `UpdateLayeredWindow`，几毫秒）。重建才是贵的：
+        胶囊约 280ms，而帧预算只有 83ms。
+        """
+        if signature is None:
             surface.hide()
             self._details.pop(name, None)
             return False
-        self._details[name] = (signature, detail)
+        cached = self._details.get(name)
+        if cached is None or cached[0] != signature:
+            detail = build()
+            if detail is None:
+                surface.hide()
+                self._details.pop(name, None)
+                return False
+            self._details[name] = (signature, detail)
+        else:
+            detail = cached[1]
+            if surface.shown:
+                return False
         surface.place(detail.x, detail.y, detail.width, detail.height)
         surface.blit(detail.pixels, detail.width, detail.height)
         surface.show()
         return True
 
     def _sync_pill(self, screen: _Screen, state: OverlayState) -> None:
-        self._sync_detail(self._pill, "pill", (state, _screen_key(screen)),
-                          lambda: self._build_pill(screen, state))
+        """胶囊走自己的缓存：按**内容**索引，可以同时留着多个状态的样子。"""
+        signature = _pill_signature(state, screen)
+        detail = self._pill_cache.get(signature)
+        if detail is None:
+            detail = self._build_pill(screen, state)
+            self._pill_cache[signature] = detail
+        if self._pill_shown == signature and self._pill.shown:
+            return
+        self._pill.place(detail.x, detail.y, detail.width, detail.height)
+        self._pill.blit(detail.pixels, detail.width, detail.height)
+        self._pill.show()
+        self._pill_shown = signature
 
     def _sync_target(self, screen: _Screen, state: OverlayState) -> bool:
         active = state is OverlayState.ACTIVE
@@ -1045,6 +1099,15 @@ class ControlOverlay:
 
 def _screen_key(screen: _Screen) -> tuple[int, int, int, int]:
     return (screen.x, screen.y, screen.width, screen.height)
+
+
+def _pill_signature(state: OverlayState, screen: _Screen):
+    """胶囊的**内容**签名 —— 只有这些变了才需要重画。
+
+    刻意按内容而不是按状态：胶囊的样子只由「文案 + 圆点色相 + 屏幕」决定。
+    按状态索引的话，两个内容相同的状态之间会白白重画一次，而一次就是 280ms。
+    """
+    return (_PILL_CONTENT[state], _PILL_HUE[state], _screen_key(screen))
 
 
 def _pill_font_px(screen: _Screen) -> int:

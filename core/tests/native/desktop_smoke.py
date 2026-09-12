@@ -323,7 +323,7 @@ def show_visual(seconds: float = 6.0) -> None:
     overlay.start()
     point = (900, 600)
     try:
-        overlay.transition(OverlayState.ARMING)
+        overlay.transition(OverlayState.ACTIVE)
         overlay.set_cursor(point)
         overlay.set_target((point[0] - 12, point[1] - 12, 24, 24))
         time.sleep(1.5)
@@ -445,7 +445,7 @@ def t9_overlay_window_does_not_hang() -> None:
     overlay.set_target((900, 600, 400, 300))
     overlay.set_cursor((1700, 700))
     overlay.start()
-    overlay.transition(OverlayState.ARMING)
+    overlay.transition(OverlayState.ACTIVE)
     overlay.transition(OverlayState.ACTIVE)
     try:
         ready = overlay.wait_ready(timeout=8.0)
@@ -515,7 +515,7 @@ def t10_frozen_states_are_single_hue() -> None:
     }
     flowing = {
         state.value: hue_bins(state)
-        for state in (OverlayState.ARMING, OverlayState.ACTIVE)
+        for state in (OverlayState.ACTIVE,)
     }
     record(
         "T10 冻结态是单一色相、流动态是光谱",
@@ -528,10 +528,9 @@ def t10_frozen_states_are_single_hue() -> None:
 def t11_spectrum_phase_is_continuous() -> None:
     """光谱相位必须**跨状态切换连续**，不能在切换点归零重来。
 
-    这条守卫来自一次真机验收的观感反馈：Arming → Active 时「并没有顺利过渡，
-    而是重开了一个流动」。根因是相位从「进入本状态的时刻」起算，而 `transition()`
-    会更新那个时刻 —— 于是每次切换都把光谱归零。两态流速统一（DEC-047）之后
-    它们本应读作同一条连续流动的光谱，突然回到起点就很扎眼。
+    这条守卫来自一次真机验收的观感反馈：切换状态时「并没有顺利过渡，而是重开了
+    一个流动」。根因是相位从「进入本状态的时刻」起算，而 `transition()` 会更新
+    那个时刻 —— 于是每次切换都把光谱归零。
 
     判据：先把相位推到非零，再切一次状态，前后的相位差必须是「这一瞬间的
     正常推进量」，而不是一个跳变。
@@ -542,7 +541,7 @@ def t11_spectrum_phase_is_continuous() -> None:
     # 把时钟原点往前拨 3 秒 —— 这样相位约 0.43，任何归零都会立刻显形。
     overlay._phase_origin = time.monotonic() - 3.0
     before = overlay._phase()
-    overlay.transition(OverlayState.ARMING)
+    overlay.transition(OverlayState.ACTIVE)
     overlay.transition(OverlayState.ACTIVE)
     after = overlay._phase()
     jump = min((after - before) % 1.0, (before - after) % 1.0)

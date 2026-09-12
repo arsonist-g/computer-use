@@ -115,7 +115,6 @@ def main() -> int:
     overlay.set_target(TARGET)
     overlay.set_cursor(CURSOR)
     overlay.start()
-    overlay.transition(OverlayState.ARMING)
     overlay.transition(OverlayState.ACTIVE)
     try:
         if not overlay.wait_ready(timeout=8.0):
