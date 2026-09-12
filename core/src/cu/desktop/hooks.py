@@ -179,12 +179,26 @@ class InputBlocker:
 
             is_down = wparam in (w.WM_KEYDOWN, w.WM_SYSKEYDOWN)
             if is_down and info.vkCode == w.VK_ESCAPE and not self._abort_latched:
-                # 物理 Esc：吞掉并触发中止。置位避免长按重复触发。
+                # 物理 Esc：**先把封锁解除，再通知回调**。
+                #
+                # 顺序与「无条件解封」都是安全底线，不是选择：
+                # 物理 Esc 是用户拿回控制的唯一保底手段，它**不能依赖回调是否存在、
+                # 是否被正确挂上、是否抛异常**。这里直接清 `_blocking`，
+                # 所以哪怕 `on_abort` 是 None 或抛了错，输入也已经放行了。
+                #
+                # （这条曾经写错：`return 1` 是无条件的，而 `on_abort()` 只在不为 None
+                # 时调用 —— 于是「没挂回调」就等于「Esc 被吞掉、什么都不发生」，
+                # 用户会觉得按 Esc 没用。它把安全底线交给了调用方的正确性。）
                 self._abort_latched = True
+                self._blocking.clear()
                 if self.on_abort is not None:
-                    self.on_abort()
+                    try:
+                        self.on_abort()
+                    except Exception:  # noqa: BLE001 —— 回调炸了不能影响解封
+                        pass
                 return 1
             if not is_down and info.vkCode == w.VK_ESCAPE:
+                # 抬起事件：封锁已解除就放行，让应用能收到完整的按键对。
                 return 1 if self._blocking.is_set() else w.user32.CallNextHookEx(
                     None, code, wparam, lparam)
 
