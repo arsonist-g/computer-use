@@ -17,7 +17,17 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +41,18 @@ const DATA_DIR = process.env.COMPUTER_USE_HOME || join(homedir(), ".computer-use
 const VENV_DIR = join(DATA_DIR, "venv");
 const VENV_PYTHON = join(VENV_DIR, "Scripts", "python.exe");
 const ENV_STAMP = join(VENV_DIR, ".computer-use-stamp");
+
+//: 环境安装的跨进程锁。两个 agent 会话同时首次运行会各跑一次 `uv venv`，撞在同一个
+//: `venv\Scripts\python.exe` 上（实测败者报 os error 32）。用独占创建的锁文件把
+//: 「建环境 + 装依赖」串行化，败者等赢家做完直接复用。
+const ENV_LOCK = join(DATA_DIR, ".env-sync.lock");
+//: 等锁上限：首次安装要 uv 建环境并装依赖，冷机器上是分钟级。
+const LOCK_WAIT_MS = 15 * 60 * 1000;
+//: 锁文件超过这个时长没被更新，视为持有者已崩（正常安装走不到这么久）。
+const LOCK_STALE_MS = 30 * 60 * 1000;
+const LOCK_POLL_MS = 500;
+//: 等对端把 venv 建出来（`uv venv` 失败后的兜底窗口）。
+const PEER_VENV_WAIT_MS = 60 * 1000;
 
 const UV_MISSING_HELP = `
 uv 未安装 —— Computer-Use 用它管理隔离的 Python 环境（DEC-018）。
@@ -55,7 +77,7 @@ function fingerprint() {
 }
 
 function haveUv() {
-  const probe = spawnSync("uv", ["--version"], { encoding: "utf8", shell: false });
+  const probe = spawnSync("uv", ["--version"], { encoding: "utf8", shell: false, windowsHide: true });
   return probe.status === 0;
 }
 
@@ -90,38 +112,94 @@ function run(cmd, args, options = {}) {
     stdio: options.capture ? "pipe" : "inherit",
     encoding: "utf8",
     shell: false,
+    // `windowsHide` 是关键的那一位：Windows 上「没有控制台的创建者」拉起控制台
+    // 子系统程序时，系统会给它新开一个控制台窗口；`stdio` 设置压不住它。
+    // 少了这一行，`env sync` 期间会弹窗（uv 探测 / uv 安装各一次）。
+    windowsHide: true,
     ...options,
   });
 }
 
+/** 同步睡眠。Node 没有 sleepSync，`Atomics.wait` 是标准做法且不让出 CPU 空转。 */
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** 戳文件是否与当前 pyproject 指纹一致（= 环境已经是这一版）。 */
+function stampMatches(want) {
+  try {
+    return existsSync(ENV_STAMP) && readFileSync(ENV_STAMP, "utf8").trim() === want;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * 安装/同步 base 环境。
+ * `VENV_PYTHON` 是否存在**且真的能跑**。
  *
- * 镜像回退见 DEC-042：本机 uv 的全局索引指向国内镜像，而镜像对个别包返回 403，
- * 报错信息却像「包不存在」。这里只在**明确失败**时回退官方源一次，
- * 且把索引源与状态码透出来 —— 静默重试会让用户永远搞不清是网络还是包的问题。
+ * 只判存在不够：对端可能正把 `python.exe` 拷到一半，文件已在但还不可用。
+ * 起一个解释器探针是唯一可靠的「可用」判据 —— 这也是「别把正常失败吞掉」的
+ * 落点：探针跑不起来就仍是失败。
  */
-function syncEnvironment({ force = false } = {}) {
-  const want = fingerprint();
-  if (!force && existsSync(VENV_PYTHON) && existsSync(ENV_STAMP)) {
-    if (readFileSync(ENV_STAMP, "utf8").trim() === want) return;
+function venvUsable() {
+  if (!existsSync(VENV_PYTHON)) return false;
+  return run(VENV_PYTHON, ["-c", "import sys"], { capture: true }).status === 0;
+}
+
+/** 独占创建锁文件；已被占用返回 false。 */
+function tryTakeLock() {
+  try {
+    const fd = openSync(ENV_LOCK, "wx");
+    try {
+      writeSync(fd, `${process.pid}\n`);
+    } finally {
+      closeSync(fd);
+    }
+    return true;
+  } catch (error) {
+    if (error.code === "EEXIST") return false;
+    throw error;
   }
+}
 
-  if (!haveUv()) {
-    process.stderr.write(UV_MISSING_HELP + "\n");
-    process.exit(1);
+/** 锁文件的年龄（毫秒）；文件刚被释放时返回 null。 */
+function lockAgeMs() {
+  try {
+    return Date.now() - statSync(ENV_LOCK).mtimeMs;
+  } catch {
+    return null;
   }
+}
 
-  mkdirSync(DATA_DIR, { recursive: true });
+/** 等对端把 venv 建出来 —— `uv venv` 撞车之后的兜底。 */
+function waitForPeerVenv() {
+  const deadline = Date.now() + PEER_VENV_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (venvUsable()) return true;
+    sleep(LOCK_POLL_MS);
+  }
+  return venvUsable();
+}
 
+/** 建环境 + 装依赖。调用方必须已持有 `ENV_LOCK`。 */
+function buildEnvironment(want) {
   if (!existsSync(VENV_PYTHON)) {
     process.stderr.write(`computer-use: 创建 Python 环境 ${VENV_DIR}\n`);
     const wanted = requiresPython();
     const venvArgs = ["venv", VENV_DIR, ...(wanted ? ["--python", wanted] : [])];
     const created = run("uv", venvArgs);
     if (created.status !== 0) {
-      process.stderr.write(`computer-use: 创建环境失败（exit ${created.status}）\n`);
-      process.exit(1);
+      // 并发首次运行的兜底：锁没覆盖到的极端情况（锁被判为陈旧而夺走、或用户在
+      // 加锁之前就手起了两个进程）下，对端可能已经/正在建好同一个环境，此时
+      // `uv venv` 会撞在拷贝 `python.exe` 上并报 os error 32。
+      // **只有环境确实可用才当成功** —— 探针跑不起来说明这是真正的失败
+      // （解释器不满足 requires-python、磁盘没空间），照旧报错退出。
+      if (waitForPeerVenv()) {
+        process.stderr.write("computer-use: 另一个进程已建好环境，直接复用\n");
+      } else {
+        process.stderr.write(`computer-use: 创建环境失败（exit ${created.status}）\n`);
+        process.exit(1);
+      }
     }
   }
 
@@ -153,6 +231,61 @@ function syncEnvironment({ force = false } = {}) {
   }
 
   writeFileSync(ENV_STAMP, want, "utf8");
+}
+
+/**
+ * 安装/同步 base 环境。
+ *
+ * 镜像回退见 DEC-042：本机 uv 的全局索引指向国内镜像，而镜像对个别包返回 403，
+ * 报错信息却像「包不存在」。这里只在**明确失败**时回退官方源一次，
+ * 且把索引源与状态码透出来 —— 静默重试会让用户永远搞不清是网络还是包的问题。
+ *
+ * **并发首次运行**（两个 agent 会话同时第一次调 CLI）必须两个都成功：`ENV_LOCK`
+ * 把「建环境 + 装依赖」串行化，后到的进程等赢家做完直接复用，而不是和它抢同一个
+ * `uv venv` 目标（实测那是 os error 32 的来源）。
+ */
+function syncEnvironment({ force = false } = {}) {
+  const want = fingerprint();
+  if (!force && stampMatches(want) && existsSync(VENV_PYTHON)) return;
+
+  if (!haveUv()) {
+    process.stderr.write(UV_MISSING_HELP + "\n");
+    process.exit(1);
+  }
+
+  mkdirSync(DATA_DIR, { recursive: true });
+
+  // `contended` = 「确实见过对端在装」。只有见过对端时才用「环境已就绪」提前
+  // 返回 —— 否则 `env sync`（force）会因为戳文件本来就匹配而变成空操作。
+  let contended = false;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    if (contended && stampMatches(want)) return;
+    if (tryTakeLock()) break;
+    contended = true;
+    const age = lockAgeMs();
+    if (age !== null && age > LOCK_STALE_MS) {
+      // 持有者多半已经崩了（正常安装走不到这么久）；夺锁继续，而不是永久阻塞。
+      rmSync(ENV_LOCK, { force: true });
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      process.stderr.write(
+        `computer-use: 等待另一个进程完成环境安装超时（${ENV_LOCK}）；` +
+          "确认没有安装进程在跑之后删除该文件再重试\n",
+      );
+      process.exit(1);
+    }
+    sleep(LOCK_POLL_MS);
+  }
+
+  try {
+    // 拿锁后复查：等锁的这段时间里赢家可能已经装完并写了戳文件。
+    if (contended && stampMatches(want)) return;
+    buildEnvironment(want);
+  } finally {
+    rmSync(ENV_LOCK, { force: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +379,10 @@ function main() {
   const child = spawnSync(
     VENV_PYTHON,
     ["-m", "cu", ...argv],
-    { stdio: "inherit", shell: false },
+    // `windowsHide: true` 是本轮发布阻塞项的直接修复：少了它，**每次** CLI 调用
+    // 都会弹一个 python 控制台黑窗（用户报告的就是这个）。stdio 走 inherit 不影响 ——
+    // 隐藏窗口靠的是创建标志 CREATE_NO_WINDOW，不是流。
+    { stdio: "inherit", shell: false, windowsHide: true },
   );
   if (child.error) {
     process.stderr.write(`computer-use: 启动 Python 客户端失败: ${child.error.message}\n`);
