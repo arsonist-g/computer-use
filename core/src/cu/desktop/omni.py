@@ -18,6 +18,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from .. import subproc
 from ..errors import CUError, ErrorCode
 
 ENV_OMNI_HOME = "COMPUTER_USE_OMNI_HOME"
@@ -129,7 +130,7 @@ def call_parse(*, image_path: str, out_dir: Path, file_name: str, ai: bool,
     env["PYTHONIOENCODING"] = "utf-8"
 
     try:
-        proc = subprocess.run(
+        proc = subproc.run(
             [str(python), str(script), "--stdio"],
             input=json.dumps(request, ensure_ascii=False) + "\n",
             capture_output=True, text=True, encoding="utf-8", errors="replace",

@@ -19,6 +19,7 @@ import math
 import random
 import time
 
+from .. import subproc
 from ..errors import CUError, ErrorCode
 from . import win32 as w
 from .base import InputResult
@@ -295,18 +296,16 @@ def _type_via_clipboard(text: str) -> dict:
 
     恢复失败不报错，但如实记进 detail —— 用户有权知道自己的剪贴板被动过。
     """
-    import subprocess
-
     previous: str | None = None
     try:
-        previous = subprocess.run(
+        previous = subproc.run(
             ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
             capture_output=True, text=True, timeout=5).stdout
     except Exception:  # noqa: BLE001
         previous = None
 
     try:
-        subprocess.run(["clip"], input=text.encode("utf-16-le"), check=True, timeout=5)
+        subproc.run(["clip"], input=text.encode("utf-16-le"), check=True, timeout=5)
     except Exception as exc:  # noqa: BLE001
         raise CUError(ErrorCode.INTERNAL_ERROR,
                       f"Unicode 输入失败，且剪贴板降级同样失败：{exc}") from exc
@@ -316,7 +315,7 @@ def _type_via_clipboard(text: str) -> dict:
     restored = False
     if previous:
         try:
-            subprocess.run(["clip"], input=previous.encode("utf-16-le"), check=True, timeout=5)
+            subproc.run(["clip"], input=previous.encode("utf-16-le"), check=True, timeout=5)
             restored = True
         except Exception:  # noqa: BLE001
             restored = False
