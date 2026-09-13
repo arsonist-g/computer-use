@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import PROTOCOL_VERSION, __version__
+from . import PROTOCOL_VERSION, __version__, subproc
 from .errors import EXIT_CODES, CUError, ErrorCode
 from .ipc import PIPE_NAME, IpcClient
 from .protocol import AppError, make_request
@@ -308,6 +308,49 @@ def render_error_json(exc: CUError) -> str:
     }}, ensure_ascii=False, indent=2)
 
 
+#: 渲染输出时要遮蔽的配置项（点号路径）。**不要往这里加非密钥**。
+_MASKED_CONFIG_KEYS = (("vlm", "api_key"),)
+#: 遮蔽时保留的首尾字符数。太短的值一律整段抹掉 —— 否则「保留首尾」反而等于泄露。
+_MASK_KEEP = 4
+#: 低于这个长度就不做「保留首尾」，直接 `***`。
+#: 16 = 首尾各 4 之后**至少还有一半是看不见的**。
+_MASK_MIN_LENGTH = _MASK_KEEP * 4
+_MASKED = "***"
+
+
+def mask_secret(value: str) -> str:
+    """把密钥渲染成保留首尾几位的形式（`sk-a2b1…fbd2`）；太短的直接 `***`。
+
+    **只作用于打印**：`config.json` 里的值、daemon 内存里的值都不改。
+    这条是对外契约的一部分（api-contract.md 的 Delta）：SKILL 教 AI agent 用
+    `config show` / `config set` 读配置，明文回显会让用户的 key 进入 agent 上下文、
+    进而进入模型服务商的日志 —— 那比「明文落盘」的暴露面大得多。
+    """
+    if not value:
+        return value
+    if len(value) < _MASK_MIN_LENGTH:
+        return _MASKED
+    return f"{value[:_MASK_KEEP]}…{value[-_MASK_KEEP:]}"
+
+
+def _mask_for_output(command: str, result: Any) -> Any:
+    """返回一份**用于打印**的副本，其中的密钥已遮蔽。
+
+    只处理 `config`；其余命令的返回里不含配置对象。返回新对象，不改调用方那份。
+    """
+    if command != "config" or not isinstance(result, dict):
+        return result
+    masked = dict(result)
+    for path in _MASKED_CONFIG_KEYS:
+        head, *rest = path
+        node = masked.get(head)
+        if rest and isinstance(node, dict) and rest[0] in node:
+            node = dict(node)
+            node[rest[0]] = mask_secret(str(node[rest[0]]))
+            masked[head] = node
+    return masked
+
+
 def render_text(command: str, result: Any, verbose: bool = False) -> str:
     """人读文本（api-contract.md §1.5 的形态）。"""
     if command == "begin":
@@ -392,13 +435,31 @@ def render_text(command: str, result: Any, verbose: bool = False) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _base_interpreter() -> str:
+    """当前进程**真正执行代码**的解释器（绕过 venv 的启动桩）。
+
+    uv/venv 建的 `Scripts\\python.exe` 是一个**启动桩**：它再拉起基础解释器
+    （`sys._base_executable`）来跑真正的逻辑，而且**不把创建标志传下去**。
+    于是 `CREATE_NO_WINDOW` 落在了桩上、基础解释器什么都没收到 —— daemon
+    因此自己新开了一个控制台（实测 `AttachConsole(daemon_pid) == True`）。
+    daemon 有控制台 ⟹ 它拉起的每个子进程都可能弹窗，与「daemon 无控制台」冲突。
+
+    `sys._base_executable` 是 3.11+ 的属性（本项目 `requires-python >= 3.11`）。
+    拿不到时退回 `sys.executable`：那只是「可能带控制台」的旧行为，不会更差。
+    """
+    return getattr(sys, "_base_executable", "") or sys.executable
+
+
 def _daemon_command(pipe: str) -> list[str]:
     """拉起 daemon 的命令行。
 
-    用 `sys.executable -m cu.daemon` 而不是 `cu-daemon` 可执行文件：CLI 与 daemon
-    来自同一个 Python 环境，用同一个解释器就绝不会出现版本错配。
+    用 `-m cu.daemon` 而不是 `cu-daemon` 可执行文件：CLI 与 daemon 来自同一个
+    Python 环境，用同一个解释器就绝不会出现版本错配。
+
+    **解释器必须是基础解释器**（见 `_base_interpreter`）：只有它才受
+    `CREATE_NO_WINDOW` 约束 —— venv 的启动桩会把这个标志丢掉。
     """
-    return [sys.executable, "-m", DAEMON_MODULE, "--pipe", pipe]
+    return [_base_interpreter(), "-m", DAEMON_MODULE, "--pipe", pipe]
 
 
 def connect(pipe: str | None = None, timeout: float = 10.0,
@@ -432,15 +493,35 @@ def connect(pipe: str | None = None, timeout: float = 10.0,
     return client
 
 
+def _daemon_env(pipe: str) -> dict[str, str]:
+    """daemon 的环境变量。
+
+    管道名走环境变量而不是命令行：管道路径里的连续反斜杠在拼接命令行时容易被吃掉，
+    双方会各连一条管道。实测踩到过，排查成本很高。
+
+    另一件事是**把 venv 补回来**：`_daemon_command` 直接跑基础解释器，会丢掉
+    venv 的路径解析（`sys.prefix` 回退到基础环境，连 `cu` 都 import 不到）。
+    启动桩自己用的机制就是设 `__PYVENV_LAUNCHER__`：基础解释器据此找到 venv 的
+    `pyvenv.cfg`，`sys.prefix` / `sys.executable` / site-packages 全部回到 venv
+    （已实测：能 import 到 venv 里安装的 `cu`）。
+    """
+    env = {**os.environ, ENV_PIPE: pipe}
+    if _base_interpreter() != sys.executable:
+        env["__PYVENV_LAUNCHER__"] = sys.executable
+        env.setdefault("VIRTUAL_ENV", sys.prefix)
+    else:
+        # 非 venv：清掉可能继承来的陈旧值，免得基础解释器被指去别的环境。
+        env.pop("__PYVENV_LAUNCHER__", None)
+    return env
+
+
 def _spawn_daemon(pipe: str) -> None:
     try:
-        subprocess.Popen(
+        subproc.Popen(
             _daemon_command(pipe),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=_DETACHED | _NO_WINDOW, close_fds=True,
-            # 管道名走环境变量而不是命令行：`\\.\pipe\` 的反斜杠在拼接命令行时
-            # 容易被吃掉，双方会各连一条管道。实测踩到过，排查成本很高。
-            env={**os.environ, ENV_PIPE: pipe},
+            env=_daemon_env(pipe),
         )
     except OSError as exc:
         raise CUError(ErrorCode.INTERNAL_ERROR,
@@ -529,6 +610,9 @@ def run(argv: list[str] | None = None) -> int:
 
 
 def emit(args: argparse.Namespace, result: Any) -> None:
+    # 遮蔽放在两条渲染路径**之上**：文本与 `--json` 用的是同一份副本，
+    # 「两种输出都遮蔽」不会因为将来新增渲染分支而漏掉一边。
+    result = _mask_for_output(args.command, result)
     if args.as_json:
         print(render_json(result))
     else:
