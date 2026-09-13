@@ -10,6 +10,15 @@ stdout/stderr 都接到 DEVNULL）。它出错时没有任何现场 —— 而 `
 这里在**同一个文件内**截掉头部、保留尾部 —— 日志的价值全在最新那几行。出问题时要看的是
 「刚刚发生了什么」，不是三小时前的第一行。**别照抄 `storage.cleanup`。**
 
+**上限是软上限，为的是让追加保持廉价**：每次写入后都检查大小，但只有超过
+「上限 × (1 + 滞回带)」才裁剪，且一次裁到「上限 × `KEEP_RATIO`」。没有滞回时，
+一超过上限每次写入都会重写几乎整个保留区（`start = size - limit`）—— 实测
+64KB 上限约 12.3ms/行、16MB 约 23.9ms/行，按默认 500MB 外推约 0.7 秒/行，
+daemon 会明显卡住。代价是文件峰值可达「上限 × (1 + 滞回带) + 最长一行」，
+因此 `daemon_log_limit_bytes` 是**软上限**（超出量有界，且与行宽同阶）。
+**峰值内存有界**这条性质不变：裁剪仍是「从尾部算偏移 → 扫一小段找行首 →
+分块拷贝保留段」，不把整个文件读进内存（见 `_enforce_limit`）。
+
 **级别过滤**：`config.daemon_log_level`（默认 `info` = 全写）是级别**下限**，
 低于它的记录直接丢掉 —— 噪音期把门槛提到 `warning` 就能只留值得看的那几行。
 
@@ -44,6 +53,14 @@ _MAX_SEVERITY = max(_SEVERITY.values())
 #: 找行首时往后扫的窗口；拷贝保留段时的块大小。两者只影响峰值内存，不影响结果。
 _SCAN_CHUNK = 8192
 _COPY_CHUNK = 1 << 20
+
+#: 裁剪后保留的比例（相对上限）：一次裁到明显低于上限，留出足够长的追加空间，
+#: 于是绝大多数写入是**纯追加**。与 `OVERSHOOT_RATIO` 一起决定重写的稀疏程度
+#: （两次重写之间约能追加 `(1 - KEEP_RATIO + OVERSHOOT_RATIO) × 上限` 字节）。
+KEEP_RATIO = 0.9
+#: 滞回带：只有超过「上限 × (1 + OVERSHOOT_RATIO)」才裁剪。上限因此是软上限，
+#: 峰值 ≈ 上限 × (1 + 滞回带) + 最长一行。设成 0 就退回「每行都重写」。
+OVERSHOOT_RATIO = 0.1
 
 
 class DaemonLog:
@@ -129,8 +146,23 @@ class DaemonLog:
             handle.write(line)
             handle.flush()
 
+    def _soft_limit(self) -> int:
+        """裁剪的触发点。上限是软的：允许超出一段滞回带，换来重写变得稀疏。"""
+        return self.limit_bytes + int(self.limit_bytes * OVERSHOOT_RATIO)
+
+    def _keep_bytes(self) -> int:
+        """裁剪后保留多少字节。明显低于上限，于是下次重写要等很久。"""
+        return max(1, int(self.limit_bytes * KEEP_RATIO))
+
     def _enforce_limit(self) -> None:
-        """超限就**截掉头部、保留尾部**（与 `storage.cleanup` 方向相反，见模块文档）。
+        """超过**软上限**就**截掉头部、保留尾部**（与 `storage.cleanup` 方向相反）。
+
+        **滞回**：只有超过 `limit × (1 + OVERSHOOT_RATIO)` 才裁剪，且一次裁到
+        `limit × KEEP_RATIO`。没有滞回时，每次超过上限的追加都会重写几乎整个保留区
+        （`start = size - limit`）—— 实测 16MB 上限 ≈ 23.9ms/行，按默认 500MB 外推
+        约 0.7 秒/行。有滞回后，两次重写之间还能再追加约
+        `(1 - KEEP_RATIO + OVERSHOOT_RATIO) × 上限` 字节，其余全是纯追加。
+        代价是文件峰值可达「上限 × (1 + 滞回带) + 最长一行」—— 软上限。
 
         **不把整个文件读进内存**：默认上限是 500MB，`read_bytes()` 会让 daemon 在滚动
         那一刻多占 500MB 常驻。这里改成「从尾部往前算偏移 → 扫一小段找到行首 →
@@ -140,7 +172,7 @@ class DaemonLog:
             return
         try:
             size = self.path.stat().st_size
-            if size <= self.limit_bytes:
+            if size <= self._soft_limit():
                 return
             start = self._keep_from(size)
             self._rewrite_from(start, size)
@@ -152,7 +184,7 @@ class DaemonLog:
 
         起点若落在某一行中间，那一行的残段一并丢掉 —— 半个时间戳比少一行更难读。
         """
-        edge = size - self.limit_bytes
+        edge = size - self._keep_bytes()
         with self.path.open("rb") as handle:
             handle.seek(edge)
             window = handle.read(_SCAN_CHUNK)
@@ -170,7 +202,9 @@ class DaemonLog:
         滚动要重写整个文件，中途崩掉会留下一个半截的日志 —— 而日志恰恰是
         「崩溃之后才来看」的东西。
         """
-        marker = (f"--- 超出 {self.limit_bytes} 字节上限，"
+        # 标记写「软上限」：上限之外允许一段滞回带（见 `_enforce_limit`），
+        # 读日志的人看到的截断点因此未必正好在上限处。
+        marker = (f"--- 超出 {self.limit_bytes} 字节软上限，"
                   f"已截去较旧的部分（{start} 字节） ---\n").encode()
         fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix=".daemon-", suffix=".tmp")
         try:

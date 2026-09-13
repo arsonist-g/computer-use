@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from cu.daemon.log import DaemonLog
+from cu.daemon.log import KEEP_RATIO, OVERSHOOT_RATIO, DaemonLog
 
 
 def test_log_file_appears_on_first_write(tmp_path: Path) -> None:
@@ -237,3 +237,73 @@ def test_rotation_of_a_single_oversized_line_keeps_the_log_alive(tmp_path: Path)
     assert text.strip(), "文件不该被清空"
     assert "后面的行还在" in text, "滚动之后日志必须还能继续用"
     assert log.path.stat().st_size <= 200 + 200
+
+
+# --------------------------------------------------------------------------- #
+# 滞回：上限附近连续 append 不该每次都重写（T4）
+# --------------------------------------------------------------------------- #
+
+
+def _count_rewrites(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
+    """把 `_rewrite_from` 换成记账版，返回记录列表（每项是 (start, size)）。"""
+    rotations: list[tuple[int, int]] = []
+    original = DaemonLog._rewrite_from
+
+    def counted(self: DaemonLog, start: int, size: int) -> None:
+        rotations.append((start, size))
+        original(self, start, size)
+
+    monkeypatch.setattr(DaemonLog, "_rewrite_from", counted)
+    return rotations
+
+
+def test_appends_just_over_the_limit_are_plain_appends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """守卫（T4）：跨过上限之后，接下来的一整段追加必须是**纯追加**。
+
+    没有滞回时，每次超过上限的写入都会重写几乎整个保留区（`start = size - limit`）：
+    实测 64KB 上限 ≈ 12.3ms/行、16MB 约 23.9ms/行，默认 500MB 按外推约 0.7 秒/行，
+    daemon 会明显卡住。这里用**重写次数**而不是计时来钉住滞回 —— 计时在 CI 上不可靠。
+    """
+    limit = 64 * 1024
+    log = DaemonLog(tmp_path / "daemon.log", limit)
+    rotations = _count_rewrites(monkeypatch)
+
+    line = "x" * 100
+    log.info(line)
+    line_bytes = log.path.stat().st_size
+
+    while not rotations:                    # 追到第一次裁剪
+        log.info(line)
+    assert len(rotations) == 1
+    after_first = log.path.stat().st_size
+    assert after_first < limit, "裁一次就该明显低于上限，否则下一行又要重写"
+    assert after_first >= limit * KEEP_RATIO - line_bytes, "裁过头了：保留段不足 KEEP_RATIO"
+
+    soft = limit + int(limit * OVERSHOOT_RATIO)
+    appends = max(1, (soft - after_first - 1) // line_bytes)
+    for _ in range(appends):
+        log.info(line)
+
+    assert len(rotations) == 1, (
+        f"跨过上限后的 {appends} 行纯追加不该触发重写；实际重写了 {len(rotations)} 次"
+    )
+
+
+def test_rewrites_stay_rare_over_a_long_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """守卫（T4）：长期看，重写次数必须远小于追加次数（滞回带来摊销）。
+
+    旧行为是「超过上限后每行一次重写」——2000 次追加会重写约 1400 次。
+    """
+    limit = 64 * 1024
+    log = DaemonLog(tmp_path / "daemon.log", limit)
+    rotations = _count_rewrites(monkeypatch)
+
+    appends = 2000
+    for _ in range(appends):
+        log.info("x" * 100)
+
+    assert rotations, "写了这么多必须有裁剪，否则这条守卫失去了对象"
+    assert len(rotations) * 20 <= appends, (
+        f"{appends} 次追加触发了 {len(rotations)} 次重写 —— 上限附近的重写没有摊销"
+        "（平均每个重写换不到 20 次纯追加）"
+    )
