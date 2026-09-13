@@ -10,6 +10,7 @@
   "files": [
     "bin/",
     "core/src/",
+    "!core/src/**/__pycache__",
     "core/pyproject.toml",
     "core/README.md",
     "SKILL.md",

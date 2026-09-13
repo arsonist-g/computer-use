@@ -108,6 +108,27 @@ computer-use parse --image C:\path\to\shot.png --session s-...
 如果检测器没有安装，`parse` 会以 `omni_not_installed` 失败并给出安装提示。其余功能照常工作，
 因为检测器是一个可选组件。
 
+### `--ai` 背后的视觉端点
+
+`--ai` 是唯一需要多模态端点的功能，它默认不指向任何地方。用配置命令接上一个：
+
+```
+computer-use config show
+computer-use config set vlm.base_url https://api.example.com/v1
+computer-use config set vlm.api_key sk-YOUR-KEY
+computer-use config set vlm.model_name gpt-4o-mini
+computer-use config show --json
+```
+
+`config show` 打印全部配置，只有 `vlm.api_key` 会被遮蔽（文本与 `--json` 都是 `sk-a2b1…fbd2` 这种形式），key 因此不会进入 agent 的上下文。`config set <key> <value>` 写入一项并落盘到 `config.json`，立即生效，
+下一条 `parse --ai` 就能用上，不需要重启任何东西。这三个键描述一个 OpenAI 兼容端点：
+`vlm.base_url` 是它的根地址（到 `/v1` 为止）、`vlm.api_key` 是 bearer token、`vlm.model_name`
+是要调用的模型 id。`config set` 只接受 `config show` 列出的键；写别的会以 `invalid_params`
+失败，并在 detail 里给出允许的集合。
+
+api key 以明文存在 `config.json` 里，所以把那个文件当机密对待，不要把值带进日志与记录。
+不带 `--ai` 的普通 `parse` 完全不碰这个端点。
+
 ## 写命令
 
 每条写命令都必须带 `--describe "<做什么、为什么>"`。省略它会在碰到桌面之前就以
@@ -149,6 +170,11 @@ computer-use type "https://example.com" --session s-... --end --describe "跳转
 工具就会重新封锁键鼠 —— 旁边的人会感到输入被反复切断。
 
 `type` 通过 Unicode 输入路径处理非 ASCII 文本，所以输入中文不需要绕道剪贴板。
+
+当这条 Unicode 路径失败时，`type` 会降级走剪贴板：先读走你原来的剪贴板内容，把待输入文本写进剪贴板，
+发 `Ctrl+V`，然后尽量把原来的内容还原。还原可能失败，结果里会如实标出 —— 失败时
+`detail.clipboard_restored` 为 `false` —— 而这种情况下你的剪贴板就被留在了我们输入的文本上。
+这条写命令仍然报 `ok`；如果剪贴板对你有意义，请读一下 detail。
 
 ### 写操作不重试，你也不许重试
 
@@ -222,6 +248,41 @@ computer-use lock status
 
 在你断定写操作卡住之前，值得先读一下 `lock status`。它报告谁持有锁、持有了多久，
 这能把「工具卡了」与「另一个会话正在干活」区分开。
+
+## 数据落点
+
+工具留下的一切都在 `~/.computer-use/`（用 `COMPUTER_USE_HOME` 可以搬走）。它是一个普通目录，
+你可以读、可以拷、可以删 —— 工具不加密它，也不把它上传到任何地方。里面会有：
+
+- `config.json` —— 全部配置项，其中包括 `vlm.api_key`，它**以明文**存在这里。密钥一旦落进这个文件，
+  就把这个文件本身当作秘密。
+- `sessions/` —— 每个会话一个目录，以会话 id 命名。里面是该会话的截图 PNG、`session.json`
+  （会话元数据）、`ops.md`（追加式命令日志），以及 `parse` 写出的结构化 markdown。
+- `logs/daemon.log` —— daemon 自己的日志（见下）。
+- `venv/` —— wrapper 首次运行时建起的 base Python 环境。
+- `venv-omni/`、`models/`、`OmniParser/` —— 检测器的独立环境、权重与上游源码。只有跑过
+  `computer-use setup omni` 之后才存在。
+
+你的屏幕截图会以文件形式留在本机。它们不是一次性缓冲：一个 `sessions/` 目录会一直持有它们，
+直到清理把它们删掉；会话共享默认 1 GiB 的配额。配额只在 `session end` 时执行，按最旧优先清理，
+且绝不删除活动会话。如果你希望某张截图比这更早消失，请自己删掉它。
+
+### daemon 日志
+
+daemon 遇到它自己也解释不了的情况时，会返回 `internal_error`，`detail.log` 里写明日志路径，
+完整的现场落在 `~/.computer-use/logs/daemon.log`。当错误码不足以定位问题时，就去看那个文件：
+它记的是 daemon 自己做过什么，而 `ops.md` 只记你的命令。
+
+`daemon_log_level` 决定写多少。合法值是 `info` / `warning` / `error`，默认 `info`（全都写）。
+把级别提到 `warning` 或 `error` 可以让日志安静下来：
+
+```
+computer-use config set daemon_log_level warning
+computer-use daemon status --json
+```
+
+日志有 500 MB 上限（`daemon_log_limit_bytes`）。超过之后，较旧的部分被截掉、保留最新的，
+所以即使机器连续跑了很久，最近的失败现场仍然读得到。
 
 ## 确认它工作正常
 

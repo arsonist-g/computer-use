@@ -98,6 +98,22 @@ Runs an element detector over an image and writes a markdown file, returning its
 
 If the detector is not installed, `parse` fails with `omni_not_installed` and a setup hint. Everything else keeps working, because the detector is an optional component.
 
+### The vision endpoint behind `--ai`
+
+`--ai` is the only feature that needs a multimodal endpoint, and nothing is configured by default. Point it at one with the config commands:
+
+```
+computer-use config show
+computer-use config set vlm.base_url https://api.example.com/v1
+computer-use config set vlm.api_key sk-YOUR-KEY
+computer-use config set vlm.model_name gpt-4o-mini
+computer-use config show --json
+```
+
+`config show` prints every setting except `vlm.api_key`, which is masked (`sk-a2b1…fbd2`) in both text and `--json` output so the key never reaches an agent's context. `config set <key> <value>` writes one key and persists it to `config.json`, so the next `parse --ai` picks it up without a restart. The three keys describe an OpenAI-compatible endpoint: `vlm.base_url` is its root (up to and including the `/v1`), `vlm.api_key` is the bearer token, and `vlm.model_name` is the model id to call. `config set` accepts only the keys that `config show` lists; anything else fails with `invalid_params` and names the allowed set.
+
+The api key rests in `config.json` in plain text, so treat that file as a secret and keep the value out of logs and records. Plain `parse` never touches this endpoint.
+
 ## Write commands
 
 Every write command must carry `--describe "<what and why>"`. Omitting it fails with `describe_required` before anything touches the desktop. The description is not decoration: it is what makes the record replayable. A log of coordinates alone cannot tell a reader what the operator was trying to do.
@@ -132,6 +148,8 @@ computer-use type "https://example.com" --session s-... --end --describe "naviga
 Use `--continue` when you are mid-task. Without it, a pause longer than the built-in window makes the tool block the keyboard and mouse again before your next command, which the person watching feels as their input being cut off repeatedly.
 
 `type` handles non-ASCII text through the Unicode input path, so typing Chinese does not require a clipboard round trip.
+
+When that Unicode path fails, `type` falls back to the clipboard: it reads your current clipboard, writes the text to the clipboard, sends `Ctrl+V`, then tries to put the old contents back. The restore can fail, and the result says so — `detail.clipboard_restored` is `false` when it does — and in that case your clipboard is left holding the text the tool typed. The write still reports `ok`; read the detail if the clipboard matters to you.
 
 ### Writes do not retry, and you must not either
 
@@ -195,6 +213,31 @@ computer-use lock status
 ```
 
 `lock status` is worth reading before you conclude that a write is hanging. It reports who holds the lock and for how long, which separates "the tool is stuck" from "another session is working".
+
+## Data on disk
+
+Everything the tool keeps lives under `~/.computer-use/` (set `COMPUTER_USE_HOME` to move it). It is a normal directory you can read, copy, or delete — the tool does not encrypt it and does not upload it anywhere. This is what you will find there:
+
+- `config.json` — every setting, including `vlm.api_key`, which is stored **in plain text**. If a key ends up here, treat the file as the secret.
+- `sessions/` — one directory per session, named by session id. Inside it are the screenshot PNGs, `session.json` (session metadata), `ops.md` (the append-only command log), and the structured markdown that `parse` writes.
+- `logs/daemon.log` — the daemon's own log (see below).
+- `venv/` — the base Python environment the wrapper builds on first run.
+- `venv-omni/`, `models/`, `OmniParser/` — the detector's separate environment, weights, and upstream source. These exist only after you run `computer-use setup omni`.
+
+Your screenshots stay on this machine as files. They are not a transient buffer: a `sessions/` directory holds them until cleanup removes them, and sessions share a default quota of 1 GiB. The quota is enforced only when a session ends, and it evicts oldest first and never deletes an active session. If you need a screenshot gone sooner than that, delete it yourself.
+
+### The daemon log
+
+When the daemon hits something it cannot explain, it returns `internal_error` with `detail.log` naming the log path, and the full account goes to `~/.computer-use/logs/daemon.log`. That file is the place to look when an error code is not enough; unlike `ops.md`, which records only your commands, it records what the daemon itself was doing.
+
+`daemon_log_level` sets how much is written. It takes `info`, `warning`, or `error`, and defaults to `info` (write everything). Raise it to `warning` or `error` to quiet a noisy log:
+
+```
+computer-use config set daemon_log_level warning
+computer-use daemon status --json
+```
+
+The log has a 500 MB ceiling (`daemon_log_limit_bytes`). Past it, the oldest part is cut and the newest is kept, so a recent failure stays readable even on a machine that has been running for a while.
 
 ## Checking that it works
 
