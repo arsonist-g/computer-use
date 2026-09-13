@@ -10,7 +10,7 @@
 ## 它验什么
 
 1. `npm pack` 的产物能被 `npm install` 装进一个干净目录；
-2. 装出来的布局对：包目录存在、`.cmd` 垫片存在、`core/pyproject.toml` / `core/src/` / `SKILL.md` 都在；
+2. 装出来的布局对：包目录存在、`.cmd` 垫片存在、`core/pyproject.toml` / `core/src/` / `skill/computer-use/` 都在；
 3. 从**装出来的** CLI 跑 `env sync` → 在隔离 home 里建出可用环境（不碰你真实的 `~/.computer-use`）；
 4. 再跑一条**不需要 daemon** 的命令（`--version`）；
 5. 再跑一条**需要 daemon** 的命令（`windows`：daemon 自动拉起）；
@@ -119,7 +119,9 @@ def main() -> int:
             names = [name.removeprefix("package/") for name in handle.getnames()]
         pyc = [name for name in names if name.endswith(".pyc") or "__pycache__" in name]
         py_files = [name for name in names if name.endswith(".py")]
-        wanted = ["bin/computer-use.mjs", "core/pyproject.toml", "SKILL.md", "package.json"]
+        wanted = ["bin/computer-use.mjs", "core/pyproject.toml", "package.json",
+                  "skill/computer-use/SKILL.md", "skill/computer-use/references/errors.md",
+                  "skill/computer-use/references/install-and-config.md"]
         missing = [name for name in wanted if name not in names]
         record("2 内容", "通过" if not missing and not pyc else "失败",
                f"条目 {len(names)} 个 · `.py` {len(py_files)} 个 · "
@@ -140,7 +142,8 @@ def main() -> int:
         record("3 安装", "通过",
                f"包目录 {package_root.is_dir()} · `.cmd` 垫片 {shim.exists()} · "
                f"pyproject { (package_root / 'core' / 'pyproject.toml').exists() } · "
-               f"SKILL.md { (package_root / 'SKILL.md').exists() }")
+               f"skill { (package_root / 'skill' / 'computer-use' / 'SKILL.md').exists() } · "
+               f"references { (package_root / 'skill' / 'computer-use' / 'references').is_dir() }")
 
         # ---- 4-6. 从装出来的 CLI 跑命令（隔离 home）----
         home = tmp / "home"
@@ -183,11 +186,14 @@ def main() -> int:
         # ---- 7. skill 安装 / 卸载可逆 ----
         skill_dir = Path(env["COMPUTER_USE_SKILL_DIR"])
         install = cli("skill", "install")
-        same = (skill_dir / "SKILL.md").exists()
+        same = ((skill_dir / "SKILL.md").exists()
+                and (skill_dir / "references" / "errors.md").exists()
+                and (skill_dir / "references" / "install-and-config.md").exists()
+                and not list(skill_dir.rglob("*-zh.md")))
         uninstall = cli("skill", "uninstall")
         gone = not skill_dir.exists()
         record("7 skill 安装/卸载", "通过" if install.returncode == 0 and same and gone else "失败",
-               f"install exit={install.returncode} 落点存在={same} · "
+               f"install exit={install.returncode} 落点与 references 齐备={same} · "
                f"uninstall exit={uninstall.returncode} 已移除={gone}")
 
         # ---- 8. 收尾：不要留下正在跑的 daemon ----

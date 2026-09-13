@@ -119,11 +119,11 @@ def main() -> int:
            f"exit={code}（应 2）· {err.splitlines()[0] if err else out}")
 
     # ---- T10 config show/set 往返 ----
-    code, out, err = cu("config", "set", "overlay_hold_seconds", "7")
+    code, out, err = cu("config", "set", "overlay_continue_seconds", "90")
     code2, out2, _ = cu("config", "show")
-    record("T10 config set/show 往返", code == 0 and '"overlay_hold_seconds": 7' in out2,
-           f"set exit={code} · show 含新值={'\"overlay_hold_seconds\": 7' in out2}")
-    cu("config", "set", "overlay_hold_seconds", "5")     # 还原
+    record("T10 config set/show 往返", code == 0 and '"overlay_continue_seconds": 90' in out2,
+           f"set exit={code} · show 含新值={'\"overlay_continue_seconds\": 90' in out2}")
+    cu("config", "set", "overlay_continue_seconds", "120")     # 还原默认
 
     # ---- T11 session list 与 end ----
     code, out, err = cu("session", "list")

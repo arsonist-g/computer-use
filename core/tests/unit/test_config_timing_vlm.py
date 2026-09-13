@@ -7,7 +7,7 @@
 2. ``vlm.user_agent`` 的默认非空、可设、可持久化、可从 dict 读入；
 3. 白名单确实包含 ``vlm.user_agent`` 与 ``overlay_exit_hold_ms``，总数为 17。
 
-时序默认值（500 / 30 / 500）已由 ``test_config.py::test_default_values_match_contract``
+时序默认值（500 / 120 / 500）已由 ``test_config.py::test_default_values_match_contract``
 覆盖，这里不再重复。
 
 oracle 标注：
@@ -31,7 +31,7 @@ from cu.errors import CUError, ErrorCode
 
 @pytest.mark.parametrize(
     "field",
-    ["overlay_arm_ms", "overlay_hold_seconds", "overlay_exit_hold_ms"],
+    ["overlay_arm_ms", "overlay_continue_seconds", "overlay_exit_hold_ms"],
 )
 def test_timing_fields_reject_negative(field: str) -> None:
     # oracle: specified —— validate 的 need()：三个时序字段都要求 >= 0。
@@ -44,7 +44,7 @@ def test_timing_fields_reject_negative(field: str) -> None:
 
 @pytest.mark.parametrize(
     "field",
-    ["overlay_arm_ms", "overlay_hold_seconds", "overlay_exit_hold_ms"],
+    ["overlay_arm_ms", "overlay_continue_seconds", "overlay_exit_hold_ms"],
 )
 def test_timing_fields_accept_zero(field: str) -> None:
     # oracle: derived —— `>= 0` 的闭区间下界 0 应被接受。

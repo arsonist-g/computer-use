@@ -1,7 +1,7 @@
 """验收清单 §9（设计阶段遗留项）里**能够实测**的那几条。
 
 对应 `core/tests/acceptance.md` §9 的 9.5（架构 §2.1 的全部 `[待测]` 性能目标）
-与 9.9（写序列兜底阈值 30s 是否够用）。§9 其余各条的结论写在那份清单里 ——
+与 9.9（不带续期标志的写命令是否在该条结束时立刻退场，DEC-075）。§9 其余各条的结论写在那份清单里 ——
 它们要么需要第二台显示器 / 独占全屏应用 / 提权应用（本机不可构造），
 要么是「有了数据之后要做的设计决策」，不是可以跑出来的事实。
 
@@ -130,14 +130,15 @@ def check_9_5() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9.9 兜底阈值 30s：调用方忘了带 --end / --continue 时会发生什么
+# 9.9 不带续期标志的写命令：序列在该条结束时结束（DEC-075）
 # ---------------------------------------------------------------------------
 
 
 def check_9_9() -> None:
-    """发一条**不带任何续期标志**的写命令，量覆盖层与输入封锁多久才自己松开。
+    """发一条**不带任何续期标志**的写命令，量覆盖层与输入封锁多久才松开。
 
-    DEC-045 把这个阈值定为 30s 并降级为兜底。这条要回答的就是那个数是否照做。
+    DEC-075 定的语义是「没说继续 = 这条之后结束了」：覆盖层随即撤下，
+    输入在退出保留期（0.5s）后还给人。这条要回答的就是它是否照做。
     """
     session = ((cu_json("begin", "--agent-hint", "acceptance-9.9").get("result") or {})
                .get("session_id") or "")
@@ -149,23 +150,24 @@ def check_9_9() -> None:
     started = time.monotonic()
     released_at = None
     overlay_off_at = None
-    while time.monotonic() - started < 55:
+    while time.monotonic() - started < 15:
         payload = cu_json("daemon", "status").get("result") or {}
         if overlay_off_at is None and payload.get("overlay_state") == "off":
             overlay_off_at = time.monotonic() - started
         if not payload.get("input_blocked"):
             released_at = time.monotonic() - started
             break
-        time.sleep(1.0)
+        time.sleep(0.1)
     cu("session", "end", "--session", session)
     if released_at is None:
-        record("9.9", "失败", "55 秒内输入封锁没有自行解除")
+        record("9.9", "失败", "15 秒内输入封锁没有自行解除")
         return
-    # 兜底阈值 30s + 退出保留期 0.5s；给一点调度余量。
-    ok = 28.0 <= released_at <= 35.0
+    # DEC-075：写命令一返回，覆盖层就该撤下；退出保留期 0.5s 之后输入解封。
+    # 上限给到 3s / 5s —— 每次轮询都要起一个 CLI 子进程，量到的是轮询粒度下的值。
+    ok = overlay_off_at is not None and overlay_off_at <= 3.0 and released_at <= 5.0
     record("9.9", "通过" if ok else "失败",
            f"覆盖层退场于 {overlay_off_at:.1f}s · 输入解封于 {released_at:.1f}s"
-           f"（配置的兜底阈值 30s + 退出保留期 0.5s）")
+           f"（期望：撤覆盖层 ≤3s、解封 ≤5s；退出保留期 0.5s）")
 
 
 # ---------------------------------------------------------------------------

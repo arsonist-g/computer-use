@@ -597,10 +597,11 @@ class Daemon:
             # 覆盖层与输入端封锁：写锁、覆盖层、输入封锁三者同属 daemon，
             # 「释放锁」与「解除封锁」因此是一次本地操作（架构 §1.5 第 2 条）。
             # begin_write 只在**写序列开始时**武装；保持窗口内的后续命令直接继续，
-            # 不再等 1.5s —— 否则一次 20 步的任务要多等 30 秒（DEC-030）。
+            # 不再等前摇 —— 否则一次 20 步的任务要多等 30 秒（DEC-030）。
+            # 带 `--continue` 才有保持窗口；不带 = 这条结束，序列就结束（DEC-075）。
             with self._write_lock:
                 self.controller.begin_write(
-                    self.config.overlay_arm_ms, self.config.overlay_hold_seconds,
+                    self.config.overlay_arm_ms, self.config.overlay_continue_seconds,
                     keep_alive=bool(params.get("continue")),
                 )
                 if params.get("end"):

@@ -37,10 +37,10 @@ CONTRACT_DEFAULTS = {
     "daemon_log_limit_bytes": 500 * 1024**2,  # 500 MiB = 524288000
     "daemon_log_level": "info",
     "lock_wait_seconds": 10,
-    # DEC-045：前摇 1500→500（缩短后仍够「让手离开」），
-    # 阈值 5→30 且退为兜底（正常由 `--continue` 决定）。
+    # DEC-045：前摇 1500→500（缩短后仍够「让手离开」）。
+    # DEC-075：`--continue` 的保持窗口 120s；不带标志的写命令不留兜底保持。
     "overlay_arm_ms": 500,
-    "overlay_hold_seconds": 30,
+    "overlay_continue_seconds": 120,
     "overlay_exit_hold_ms": 500,
     "daemon_idle_exit_seconds": 600,
     "image_format": "png",
@@ -55,7 +55,7 @@ CONTRACT_SETTABLE_KEYS = {
     "daemon_log_level",
     "lock_wait_seconds",
     "overlay_arm_ms",
-    "overlay_hold_seconds",
+    "overlay_continue_seconds",
     "overlay_exit_hold_ms",
     "daemon_idle_exit_seconds",
     "image_format",
@@ -177,7 +177,7 @@ def test_default_config_is_valid() -> None:
         {"daemon_log_limit_bytes": -1},
         {"lock_wait_seconds": -1},
         {"overlay_arm_ms": -1},
-        {"overlay_hold_seconds": -1},
+        {"overlay_continue_seconds": -1},
         {"daemon_idle_exit_seconds": 0},
         {"daemon_idle_exit_seconds": -5},
         {"image_format": "jpg"},
@@ -214,7 +214,7 @@ def test_validate_does_not_silently_coerce_image_format() -> None:
     [
         {"lock_wait_seconds": 0},
         {"overlay_arm_ms": 0},
-        {"overlay_hold_seconds": 0},
+        {"overlay_continue_seconds": 0},
         {"mouse_max_points": 1},
         {"image_format": "webp"},
         {"image_format": "png"},
@@ -516,7 +516,7 @@ def test_apply_set_nested_is_isolated_from_other_nested_fields() -> None:
 
 def test_apply_set_result_is_persistable(tmp_path: Path) -> None:
     # oracle: derived —— apply_set 的产物应是合法配置，可直接 save/load。
-    updated = apply_set(Config(), "overlay_hold_seconds", "9")
+    updated = apply_set(Config(), "overlay_continue_seconds", "9")
     target = tmp_path / "config.json"
     updated.save(target)
-    assert Config.load(target).overlay_hold_seconds == 9
+    assert Config.load(target).overlay_continue_seconds == 9

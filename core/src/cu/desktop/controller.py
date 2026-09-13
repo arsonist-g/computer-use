@@ -16,8 +16,8 @@
 正常帧 43ms），观感就是光谱流动卡一下。
 
 关键取舍：**前摇的粒度是「每次写序列一次」，不是每条写命令一次**（DEC-030）。
-否则一次 20 步的任务要多等 30~40 秒。连续写操作之间若间隔小于保持阈值，
-覆盖层与封锁都保持 —— 这正是写操作之间那次 LLM 思考不该被切断的原因。
+否则一次 20 步的任务要多等 30~40 秒。连续写操作之间只要调用方带了 `--continue`，
+覆盖层与封锁就保持 —— 这正是写操作之间那次 LLM 思考不该被切断的原因（DEC-075）。
 """
 
 from __future__ import annotations
@@ -35,15 +35,10 @@ def _aborted_error(message: str) -> CUError:
     """「用户已中止」的统一错误。
 
     它不是故障，是用户意图 —— 调用方**不应**自动重来（DEC-028：
-    尊重中止，先与用户确认）。
+    尊重中止，先与用户确认）。它只挡它自己那一次调用：中止是**一次性**闸门，
+    不闩住后续的写命令（DEC-068）。
     """
     return CUError(ErrorCode.ABORTED_BY_USER, message)
-
-
-#: `--continue` 的保持时长。取得足够长，让「调用方说还要继续」在它下一条命令
-#: 到达之前不会被阈值提前掐断；又不会长到调用方其实已经结束时还扣着用户的键鼠 ——
-#: 真结束时会显式发 `--end`，这一条只是「调用方崩了」的兜底。
-_KEEP_ALIVE_SECONDS = 120.0
 
 
 class WriteSequenceController:
@@ -93,7 +88,7 @@ class WriteSequenceController:
 
     # ---- 写序列 ----
 
-    def begin_write(self, arm_ms: int, hold_seconds: float, *,
+    def begin_write(self, arm_ms: int, continue_seconds: float, *,
                     keep_alive: bool = False) -> None:
         """一条写命令开始。首次（或上一条没说要继续）才起前摇。
 
@@ -101,19 +96,25 @@ class WriteSequenceController:
         此时不封锁等于没有前摇。但覆盖层直接进 Active —— 前摇与 Active 长得一模一样，
         没有理由为它单设一个要画出来的状态（见模块文档）。
 
-        `keep_alive=True`（来自 `--continue`）表示调用方明确要接着操作：
-        覆盖层与封锁都保持，不再重新起前摇。这是 DEC-045 的核心 ——
-        阈值是个**猜**（下一条命令什么时候来，事先不知道），而调用方知道，
-        所以把这个判断交给它。
+        `keep_alive=True`（来自 `--continue`）表示调用方明确要接着操作：覆盖层与封锁
+        再保持 `continue_seconds`，不重新起前摇。这是 DEC-045 的核心 ——
+        下一条命令什么时候来只有调用方知道，所以把这个判断交给它。
+
+        不带这个标志时**不留兜底保持**（DEC-075）：这条命令结束，序列就结束。
+        「没说继续」的意思本来就是「这条之后结束了」，猜一个时长只会白扣用户的键鼠。
         """
         with self._lock:
             now = time.monotonic()
             if self._aborted.is_set():
-                # 用户已经按过 Esc —— 在用户重新明确继续之前不再自动重新武装。
-                # 否则中止之后下一条命令立刻又把输入封回去，用户会觉得按 Esc 没用。
-                raise _aborted_error("上一轮操作已被用户中止；请与用户确认后再继续")
-            # 显式续期优先：调用方说了要连续操作，就不看阈值。
-            self._hold_until = now + (hold_seconds if not keep_alive else _KEEP_ALIVE_SECONDS)
+                # 用户按过 Esc，而**这条**就是那之后的第一条写命令：拒绝执行，并把中止
+                # **消费掉**（DEC-068）。中止的语义是「当场喊停、让 AI 去问用户」，不是
+                # 把写通路闩到 daemon 重启 —— 用户说了「可以继续」之后，直接再调一次就该成功。
+                # 不消费的话，它之后的每一条命令都要白挨一次，看起来就像工具坏了。
+                self._clear_aborted_locked()
+                raise _aborted_error(
+                    "用户已按 Esc 中止；本次未执行。请与用户确认后再继续 —— 确认后再次调用即可")
+            # 只有显式续期才留保持窗口；不带标志 = 这条之后序列结束（DEC-075）。
+            self._hold_until = now + (continue_seconds if keep_alive else 0.0)
             if self.overlay.visible:
                 return                # 仍在保持窗口内：不重新起前摇，输入保持封锁
             self._armed_at = now
@@ -132,7 +133,12 @@ class WriteSequenceController:
         deadline = time.monotonic() + arm_ms / 1000.0
         while time.monotonic() < deadline:
             if self._aborted.is_set():
-                raise _aborted_error("用户在前摇期间按下了 Esc")
+                # 中止**落在这条命令身上**（用户在它的前摇期间按了 Esc）：这次机会已经用掉了，
+                # 同样把闩消费掉 —— 否则 AI 问完用户回来，下一条命令还要再白挨一次（DEC-068）。
+                with self._lock:
+                    self._clear_aborted_locked()
+                raise _aborted_error(
+                    "用户在前摇期间按下了 Esc；本次未执行。请与用户确认后再继续 —— 确认后再次调用即可")
             time.sleep(0.02)
 
     def note_error(self) -> None:
@@ -154,9 +160,17 @@ class WriteSequenceController:
     def resume(self) -> None:
         """用户确认后允许新的写序列（清掉中止状态）。"""
         with self._lock:
-            self._aborted.clear()
-            self.overlay.transition(OverlayState.OFF)
-            self.blocker.set_blocking(False)
+            self._clear_aborted_locked()
+
+    def _clear_aborted_locked(self) -> None:
+        """清掉中止状态。**调用者必须已持有 `self._lock`**。
+
+        `resume()` 与「写命令把中止消费掉」两条路径共用它 —— `self._lock` 不可重入，
+        在后一条路径上直接调 `resume()` 会自己把自己锁死。
+        """
+        self._aborted.clear()
+        self.overlay.transition(OverlayState.OFF)
+        self.blocker.set_blocking(False)
 
     def end_sequence(self) -> None:
         """调用方显式结束写序列（`--end`）。

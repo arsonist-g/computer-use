@@ -85,8 +85,9 @@ def _common_options() -> argparse.ArgumentParser:
                         help="截图 / 结构化数据内联返回 base64，而不是只给路径")
     common.add_argument("--verbose", action="store_true", default=argparse.SUPPRESS,
                         help="追加低层细节")
-    #: 写序列的显式续期 / 结束（DEC-045）。默认「不续期」—— 阈值仍是兜底，
-    #: 但连续操作时带上 `--continue` 就不会重复走前摇、也不会中断输入封锁。
+    #: 写序列的显式续期 / 结束（DEC-045 / DEC-075）。默认「不续期」= 这条写命令之后
+    #: 序列就结束；只有带上 `--continue` 才保留覆盖层与输入封锁，
+    #: 连续操作因此不会重复走前摇、也不会中断封锁。
     common.add_argument("--continue", action="store_true", dest="keep_alive",
                         default=argparse.SUPPRESS,
                         help="我还要接着操作：保持覆盖层与输入封锁，不重新武装")

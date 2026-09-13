@@ -41,7 +41,7 @@ class FakeController:
         self.overlay = FakeOverlay()
         self.state = "off"
 
-    def begin_write(self, arm_ms: int, hold_seconds: float, *, keep_alive: bool = False) -> None:
+    def begin_write(self, arm_ms: int, continue_seconds: float, *, keep_alive: bool = False) -> None:
         pass
 
     def wait_for_arm(self, arm_ms: int) -> None:

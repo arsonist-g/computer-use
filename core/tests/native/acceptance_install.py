@@ -188,13 +188,21 @@ def check_8_4_and_8_5() -> None:
     try:
         proc = run_node(["skill", "install"], home=Path(tempfile.gettempdir()),
                         env_extra={"COMPUTER_USE_SKILL_DIR": str(skill_dir)}, timeout=60)
+        source = ROOT / "skill" / "computer-use"
         installed = skill_dir / "SKILL.md"
-        source = ROOT / "SKILL.md"
-        same = (installed.exists() and source.exists()
-                and installed.read_text(encoding="utf-8") == source.read_text(encoding="utf-8"))
-        record("8.4", "通过" if (proc.returncode == 0 and same) else "失败",
+        refs_dir = skill_dir / "references"
+        same = (installed.exists() and (source / "SKILL.md").exists()
+                and installed.read_text(encoding="utf-8")
+                == (source / "SKILL.md").read_text(encoding="utf-8"))
+        refs = sorted(p.name for p in refs_dir.glob("*.md")) if refs_dir.is_dir() else []
+        want_refs = sorted(p.name for p in (source / "references").glob("*.md")
+                           if not p.name.endswith("-zh.md"))
+        translated = sorted(p.name for p in skill_dir.rglob("*-zh.md"))
+        ok = proc.returncode == 0 and same and refs == want_refs and not translated
+        record("8.4", "通过" if ok else "失败",
                f"exit={proc.returncode} · 落点={installed}（存在={installed.exists()}，"
-               f"与包内 SKILL.md 逐字节相同={same}）")
+               f"与包内 SKILL.md 逐字节相同={same}）· references {refs} · "
+               f"漏装的 references {sorted(set(want_refs) - set(refs)) or '无'} · 装进来的译本 {translated or '无'}")
 
         proc2 = run_node(["skill", "uninstall"], home=Path(tempfile.gettempdir()),
                          env_extra={"COMPUTER_USE_SKILL_DIR": str(skill_dir)}, timeout=60)

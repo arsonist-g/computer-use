@@ -6,7 +6,7 @@
  *   1. 定位（必要时创建并同步）uv 管理的 Python 环境；
  *   2. 把 argv / stdio / 退出码原样转发给 `python -m cu`；
  *   3. 首次安装流程：检测 uv、建环境、装依赖；
- *   4. `skill install|uninstall` —— 把 SKILL.md 装到调用方 Agent 的技能目录。
+ *   4. `skill install|uninstall` —— 把 skill（SKILL.md 与 references/）装到调用方 Agent 的技能目录。
  *
  * 没有 Node↔Python 的跨语言协议：Node 进程被 Python 进程整体替换（exec 语义），
  * 因此不存在需要维护的中间格式。
@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync,
+  cpSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -302,16 +303,16 @@ function skillDirs() {
 }
 
 function installSkill() {
-  const source = join(PACKAGE_ROOT, "SKILL.md");
-  if (!existsSync(source)) {
-    process.stderr.write(`computer-use: 包内缺少 SKILL.md（${source}）\n`);
+  const source = join(PACKAGE_ROOT, "skill", SKILL_NAME);
+  if (!existsSync(join(source, "SKILL.md"))) {
+    process.stderr.write(`computer-use: 包内缺少 skill（${source}）\n`);
     return 1;
   }
-  const body = readFileSync(source, "utf8");
   for (const dir of skillDirs()) {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "SKILL.md"), body, "utf8");
-    process.stdout.write(`已安装 SKILL: ${join(dir, "SKILL.md")}\n`);
+    // 整目录拷（SKILL.md 与 references/）。带 `-zh` 后缀的是给人校对的译本，不进技能目录。
+    cpSync(source, dir, { recursive: true, filter: (src) => !src.endsWith("-zh.md") });
+    process.stdout.write(`已安装 SKILL: ${dir}\n`);
   }
   process.stdout.write(
     "\n注意：技能目录写入会让调用方 Agent 在每次会话看到这份说明。\n" +
@@ -341,7 +342,7 @@ function printHelp() {
       "",
       "环境管理:",
       "  env sync              重新同步 Python 环境（升级后自动触发）",
-      "  skill install         把 SKILL.md 装到调用方 Agent 的技能目录",
+      "  skill install         把 skill（SKILL.md 与 references/）装到调用方 Agent 的技能目录",
       "  skill uninstall       移除已安装的 SKILL",
       "",
       "其余命令（begin / windows / screenshot / click / type / key / parse ...）",

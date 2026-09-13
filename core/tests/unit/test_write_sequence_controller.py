@@ -19,6 +19,7 @@ import pytest
 import cu.desktop.controller as controller_mod
 from cu.desktop.controller import WriteSequenceController
 from cu.desktop.overlay import OverlayState
+from cu.errors import CUError, ErrorCode
 
 
 class FakeOverlay:
@@ -106,7 +107,7 @@ def ctrl(monkeypatch):
 
 def test_begin_write_arms_and_blocks_from_first_frame(ctrl) -> None:
     controller, _clock = ctrl
-    controller.begin_write(arm_ms=500, hold_seconds=5)
+    controller.begin_write(arm_ms=500, continue_seconds=0)
     # oracle: specified —— 前摇期间就封锁输入（overlay.md §2.2：不封锁等于没有前摇）。
     assert controller.blocker.blocking is True
     # oracle: specified —— 覆盖层直接进 Active。前摇是一个**计时**概念（`_armed_at`），
@@ -117,31 +118,38 @@ def test_begin_write_arms_and_blocks_from_first_frame(ctrl) -> None:
     assert controller.armed(arm_ms=500) is False
 
 
-def test_keep_alive_ignores_hold_threshold(ctrl) -> None:
+def test_keep_alive_holds_until_the_continue_window_expires(ctrl) -> None:
     controller, clock = ctrl
-    # hold_seconds 只有 1s，但 keep_alive=True（来自 --continue）表示调用方还要继续操作。
-    controller.begin_write(arm_ms=500, hold_seconds=1, keep_alive=True)
-    clock.advance(2.0)          # 已超过 hold_seconds，但仍远小于 keep-alive 窗口
+    # keep_alive=True（来自 `--continue`）：调用方说了还要继续操作，保持窗口由
+    # `continue_seconds` 给（daemon 传的是 config.overlay_continue_seconds）。
+    controller.begin_write(arm_ms=500, continue_seconds=30, keep_alive=True)
+    clock.advance(29.0)
     controller.tick(0)
-    # oracle: specified —— DEC-045：keep_alive=True 时不看阈值，覆盖层与封锁都保持。
+    # oracle: specified —— DEC-045：窗口内覆盖层与封锁都保持。
     assert controller.blocker.blocking is True
-    # oracle: derived —— 覆盖层未被撤下（仍在保持窗口内）。
     assert controller.overlay.visible is True
-
-
-def test_expired_hold_without_keep_alive_exits(ctrl) -> None:
-    controller, clock = ctrl
-    controller.begin_write(arm_ms=500, hold_seconds=1)
-    clock.advance(2.0)
+    clock.advance(2.0)          # 越过 30s 窗口
     controller.tick(0)
-    # oracle: specified —— 保持窗口过期且无 keep-alive ⇒ 走退出路径；exit_hold_ms=0 立即解封。
+    # oracle: derived —— 窗口过期就走退出路径；exit_hold_ms=0 时立即解封。
+    assert controller.overlay.state is OverlayState.OFF
+    assert controller.blocker.blocking is False
+
+
+def test_write_without_keep_alive_ends_the_sequence(ctrl) -> None:
+    """DEC-075：不带 `--continue` 的写命令结束序列 —— 不留兜底保持。"""
+    controller, clock = ctrl
+    # continue_seconds 给得很大也没用：没有 keep_alive 就不设保持窗口。
+    controller.begin_write(arm_ms=500, continue_seconds=1000)
+    clock.advance(0.1)
+    controller.tick(0)
+    # oracle: specified —— 「没说继续」= 这条之后结束了，输入立刻还给人。
     assert controller.overlay.state is OverlayState.OFF
     assert controller.blocker.blocking is False
 
 
 def test_end_sequence_forces_exit_path_without_immediate_release(ctrl) -> None:
     controller, clock = ctrl
-    controller.begin_write(arm_ms=500, hold_seconds=1000, keep_alive=True)
+    controller.begin_write(arm_ms=500, continue_seconds=1000, keep_alive=True)
     controller.end_sequence()
     # oracle: specified —— end_sequence 只把保持窗口置为过期，不在这里立刻解封。
     assert controller.blocker.blocking is True
@@ -154,7 +162,7 @@ def test_end_sequence_forces_exit_path_without_immediate_release(ctrl) -> None:
 
 def test_exit_hold_first_tick_removes_overlay_but_keeps_blocking(ctrl) -> None:
     controller, clock = ctrl
-    controller.begin_write(arm_ms=500, hold_seconds=1000, keep_alive=True)
+    controller.begin_write(arm_ms=500, continue_seconds=1000, keep_alive=True)
     controller.end_sequence()
     controller.tick(exit_hold_ms=500)
     # oracle: specified —— 退出保留期：先撤覆盖层。
@@ -167,7 +175,7 @@ def test_exit_hold_first_tick_removes_overlay_but_keeps_blocking(ctrl) -> None:
 
 def test_exit_hold_releases_after_deadline(ctrl) -> None:
     controller, clock = ctrl
-    controller.begin_write(arm_ms=500, hold_seconds=1000, keep_alive=True)
+    controller.begin_write(arm_ms=500, continue_seconds=1000, keep_alive=True)
     controller.end_sequence()
     controller.tick(exit_hold_ms=500)     # 第一轮：撤覆盖层
     clock.advance(0.6)                    # 越过 0.5s 保留期
@@ -178,7 +186,7 @@ def test_exit_hold_releases_after_deadline(ctrl) -> None:
 
 def test_exit_hold_zero_releases_on_first_tick(ctrl) -> None:
     controller, clock = ctrl
-    controller.begin_write(arm_ms=500, hold_seconds=1000, keep_alive=True)
+    controller.begin_write(arm_ms=500, continue_seconds=1000, keep_alive=True)
     controller.end_sequence()
     controller.tick(exit_hold_ms=0)
     # oracle: specified —— exit_hold_ms=0 时一次 tick 就解封。
@@ -190,7 +198,7 @@ def test_exit_hold_zero_releases_on_first_tick(ctrl) -> None:
 
 def test_abort_releases_immediately_without_hold(ctrl) -> None:
     controller, _clock = ctrl
-    controller.begin_write(arm_ms=500, hold_seconds=1000, keep_alive=True)
+    controller.begin_write(arm_ms=500, continue_seconds=1000, keep_alive=True)
     assert controller.blocker.blocking is True
     controller.abort("用户按下物理 Esc")
     # oracle: specified —— 中止的第一件事就是解除封锁，不等退出保留期。
@@ -198,3 +206,40 @@ def test_abort_releases_immediately_without_hold(ctrl) -> None:
     assert controller.aborted is True
     # oracle: specified —— 中止进入 Stopping 态。
     assert controller.overlay.state is OverlayState.STOPPING
+
+def test_abort_refuses_exactly_one_write_command_and_does_not_latch(ctrl) -> None:
+    """DEC-068：中止是**一次性**闸门 —— 挡住下一条写命令，然后自己清掉。"""
+    controller, _clock = ctrl
+    controller.abort("用户按下物理 Esc")
+
+    # oracle: specified —— 中止之后的第一条写命令不执行：它就是「告诉 AI 停下」的那次机会。
+    with pytest.raises(CUError) as raised:
+        controller.begin_write(arm_ms=500, continue_seconds=0)
+    assert raised.value.code is ErrorCode.ABORTED_BY_USER
+    # oracle: derived —— 被拒的命令不能把输入封回去（那正是用户按 Esc 想拿回的东西），
+    # 闩也不能留着：留着就等于把写通路闩到 daemon 重启（DEC-068 的旧行为）。
+    assert controller.blocker.blocking is False
+    assert controller.overlay.state is OverlayState.OFF
+    assert controller.aborted is False
+
+    # oracle: specified —— 用户说了「可以继续」之后直接再调一次即可，不需要重启 daemon。
+    controller.begin_write(arm_ms=500, continue_seconds=0)
+    assert controller.overlay.state is OverlayState.ACTIVE
+    assert controller.blocker.blocking is True
+
+
+def test_abort_during_the_arming_pause_consumes_the_latch(ctrl) -> None:
+    """Esc 落在这条命令的前摇期间：这条已经挨过了，别让**下一条**再白挨一次。"""
+    controller, _clock = ctrl
+    controller.begin_write(arm_ms=500, continue_seconds=0)
+    controller.abort("用户按下物理 Esc")
+
+    # oracle: specified —— 前摇期间的 Esc 让这条命令立刻失败。
+    with pytest.raises(CUError) as raised:
+        controller.wait_for_arm(arm_ms=500)
+    assert raised.value.code is ErrorCode.ABORTED_BY_USER
+    # oracle: derived —— 机会已经用在这一条上了，闩随之消费掉。
+    assert controller.aborted is False
+
+    controller.begin_write(arm_ms=500, continue_seconds=0)
+    assert controller.overlay.state is OverlayState.ACTIVE
