@@ -270,3 +270,62 @@ F7b / F8 / F9）；剩下 5 条（F1 / F4 / F5 / F10 / F11）于同日处置完�
   `tests/native/acceptance_preflight.py`（**新增**，§2.3 写操作前置的期望身份）**四条全过** ·
   `acceptance_lifecycle.py` §5 **十三项全过**（含 §5.2b 断言翻面、§F1、§F11）·
   `acceptance_omni_extra.py --only 7.7` 通过（错误码改从 **stdout** 读）
+
+---
+
+## 发布前审查（2026-09-13 · 0.1.0 首发前）
+
+这一节是**换视角**审出来的：站在「一个陌生用户把这个包装上、在一个我们没见过的环境里跑」的位置，
+审代码**与打包产物**。与上面的验收清单不同 —— 清单问「功能按设计工作了吗」，这里问
+「别人装上之后会看到什么、会被动到什么、会在哪里卡住」。判据是
+`task-tracker/active-2026-09-13-pre-release-review.md` 的 T1~T6。
+
+### 本轮新增的三条真机判据
+
+| 脚本 | 验什么 | 结果 |
+|---|---|---|
+| `tests/native/acceptance_no_console_window.py` | 跑 CLI **不许出现多出来的*可见*控制台窗口**（入口按规范调用方隐藏；A/B/C 自动 + `type` 剪贴板回落那条**需人工**） | ✅ A/B/C 全过（0 个新可见窗口；可见窗口总数 1→1） |
+| `tests/native/acceptance_pack_install.py` | **打包后的全新安装**：`npm pack` → `npm install` → 从装出来的 `.cmd` 垫片跑 `env sync` / `--version` / `windows` / `skill install\|uninstall`，全程隔离 home | ✅ 8 项全过（38 条目 / 32 `.py` / 0 `.pyc`） |
+| `tests/native/acceptance_concurrent_start.py` | **并发首次运行**：两个进程同时起，都要成功，且只能有一个 daemon | ✅ 通过（修复前 #2 必失败） |
+
+### 缺陷（G 系列，F 系列的延续；甲/乙编号分开只因为不是同一轮）
+
+| # | 缺陷 | 证据 | 处置 |
+|---|---|---|---|
+| G1 | **跑 CLI 弹控制台黑窗**（用户报告，发布阻塞项）：Node 启动器三处 `spawnSync` 都没带 `windowsHide`；Python 侧 8 处 `subprocess.*` 都没带 `CREATE_NO_WINDOW` | 修复前 `acceptance_no_console_window.py` 的 A/C 各泄漏 1~2 个可见窗口（标题正是 venv 里 `python.exe` 的路径） | ✅ **已修**（DEC-059）：新增 `cu/subproc.py` 统一静默 + 启动器全部 `windowsHide`。守卫：`tests/unit/test_no_console_window.py` + 上表第一条判据 |
+| G2 | **daemon 的 `_DETACHED \| _NO_WINDOW` 实际不生效**：uv 建的 venv `Scripts\python.exe` 是**启动桩**，它再拉起基础解释器时**不传递**创建标志 —— 于是 daemon 自己新开一个控制台 | `AttachConsole(<daemon pid>)` = **True**（对照组 `explorer.exe` / `PI-Desktop.exe` 均 False + err=6）；控制台宿主的创建者链是「基础解释器 ← 数据目录 venv python」 | ✅ 已修（DEC-059）：改用 `_base_interpreter()` + `__PYVENV_LAUNCHER__` 补回 venv |
+| G3 | **判据自身的错**：拿「新控制台宿主进程」当泄漏，会把**已经修好的**判成泄漏 —— `CREATE_NO_WINDOW` 只是「分配一个**没有窗口**的控制台」，宿主进程照样会起 | 修好后三条用例各报 2~4 个「泄漏宿主」，而可见窗口是 0 | ✅ 已修（DEC-059「判据」节）：判据收回「**可见**窗口」；宿主进程降为诊断输出 |
+| G4 | **打包多带 31 个 `.pyc`**：`files` 里的 `"core/src/"` 把开发机的 `__pycache__` 一起收进包 | 实测 `npm pack` tarball 372KB / 68 条目，含 31 个 `.pyc` | ✅ 已修（DEC-060）：`files` 加 `"!core/src/**/__pycache__"`；守卫：`acceptance_pack_install.py` 的「内容」项 |
+| G5 | **`config show` / `config set` 把 `vlm.api_key` 明文打到 stdout** → 进 agent 上下文 → 进模型服务商日志 | T2 取证：`config show` 与 `config set`（设任意键）都回显整份配置，含 key | ✅ **已修**（DEC-061）：输出统一遮蔽（`"api_key": "sk-F…cdef"`），磁盘上仍是完整值。守卫：`tests/unit/test_cli_config_masking.py`；真机复验见本轮报告 |
+| G6 | **`setup omni` 在干净机器上必失败**：`_download_weights()` 在 **base 环境**里 in-process import `huggingface_hub`，而它只装在 `venv-omni`；base 的声明依赖只有 `windows-capture` | 隔离全新 home 首跑：`internal_error: ModuleNotFoundError: No module named 'huggingface_hub'`（`detail.method=daemon.setup_omni`）；**真实 base venv 里也确实没有它** | ✅ **已修**（DEC-062）：权重下载改由 omni 环境执行。真机证据：隔离环境里权重落进 `venv-omni` 且**平铺**、有进度日志、无 `ModuleNotFoundError`。守卫：`tests/unit/test_omni_setup_weights.py` |
+| G7 | **daemon 日志每写一行就重写整个保留区**：达上限后 `_enforce_limit` 立刻 `_rewrite_from(start, size)`，而 `start = size - limit` | 实测每行成本：1MiB 上限 8.5ms / 16MiB 23.9ms → 按默认 **500MB** 外推约 **0.7 s/行** | ✅ **已修**（DEC-063）：加滞回，上限变**软上限**。守卫：`tests/unit/test_daemon_log.py` 新增「重写次数 ≪ 追加次数」的确定性断言 |
+| G8 | **并发首次运行必有一个进程失败**：两个进程对同一路径跑 `uv venv`，撞在拷贝 `python.exe`（os error 32），**败者不重试** | 隔离全新 home 同时起两个 `env sync`：#1 exit=0 / **#2 exit=1**（uv 的原始报错） | ✅ **已修**（DEC-064）：败者复用胜者成果 + 有界重试。守卫：`acceptance_concurrent_start.py` |
+| G9 | 改坏的 `config.json` 让 CLI 报 `internal_error: daemon 未在运行（管道不可用）` 且**等 27 秒**才失败，真实原因（配置解析失败）被吞掉 | `tests/native/out/`（T4 取证）case1：daemon 前台退出时报的是清楚的中文错误，CLI 那边变成管道错误 | ⬜ **待办**：修法要动「连 daemon 之前先本地校验配置」或把启动失败原因透出来，改动面大于本轮其余项 —— **本轮不做**，理由记于此 |
+| G10 | 会话目录不可写时 `screenshot` 报 `capture_failed` + 「确认窗口仍存在，独占全屏请改为无边框全屏」，而真实原因是**写文件被拒**（PermissionError） | T4 取证 case2c | ⬜ **待办**：提示语指错方向（把权限/磁盘问题说成捕获问题），属诊断质量、不是数据损坏；本轮不做 |
+| G11 | `session.json` 写失败**静默**：截图文件在、`ops.md` 有两条，但 `session.json` 的 `screenshot_count` 少记一条 | T4 取证 case2b：磁盘 2 张 PNG / manifest 记 1 | ⬜ **待办**：影响配额口径与 `session list` 的数字；要改得先定「manifest 写失败时该报错还是降级」，属设计取舍，本轮不做 |
+
+### 本轮「明确接受」的项
+
+见 **DEC-065**：明文 `config.json` / 固定管道名（同机两用户）/ `orphaned` 会话仍可读写 /
+日志目录不可写时静默失败 / 密钥抹除靠「登记值」。每条都写了理由与证据
+（ACL 实测：`~` 只授权 SYSTEM / Administrators / 当前用户，**无** `BUILTIN\\Users`、无 `Everyone`）。
+
+### 本轮**未由我验证**的项（未获授权 / 无法构造）
+
+| 项 | 为什么没跑 | 你可以怎么跑 |
+|---|---|---|
+| `type` 的**剪贴板回落**路径（黑窗判据 D） | 会**读取并覆盖你的剪贴板** —— 未获授权 | `computer-use type "中文" --session <sid> --describe "test"`，同时看屏幕上有没有多出控制台窗口；结果里的 `detail.clipboard_restored` 会告诉你剪贴板有没有还回去 |
+| **输入封锁的崩溃恢复**（daemon 被杀 ⟹ 键鼠立刻恢复） | 需要真实封锁输入（霸占键鼠）—— 未获授权 | 起一条写命令让覆盖层武装，然后在任务管理器里结束那个 `python.exe`，看键鼠是否**立刻**恢复 |
+| **覆盖层随进程消失**（崩溃路径） | 同上（需要把覆盖层画到屏幕上） | 同上，观察覆盖层是否随 daemon 一起消失 |
+| `acceptance_preflight.py`（4 条）与 `acceptance_lifecycle.py` §5（13 条） | 两个脚本会发**写命令**（`move` / `scroll`）⟹ 会武装覆盖层并封锁输入 —— 未获授权 | `.venv/Scripts/python.exe core/tests/native/acceptance_preflight.py`、`…/acceptance_lifecycle.py` |
+| 多显示器 / 独占全屏 / 提权窗口 / 物理按键穿透 | 见 §9 各条（本轮不变） | — |
+
+### 验收结论（本轮）
+
+- 黑窗：**真机复现 → 修复 → 留守卫**，三条自动判据全过（**0 个多出来的可见窗口**）。
+- T1~T6 **每一条都有结论**：**修了 8 条（G1~G8）** · **明确接受 5 条**（DEC-065）·
+  **待办 3 条（G9~G11）**，每条待办都写了「为什么现在不做」。
+- 回归基线（本轮最后一次改动之后重跑）：`pytest` **493 全绿**（本轮 468 → 493，新增的全是守卫）·
+  `ruff` 干净 · `acceptance_pack_install.py` **8/8** · `acceptance_concurrent_start.py` **通过** ·
+  `acceptance_no_console_window.py` **A/B/C 全过** · `acceptance_omni_extra.py --only 7.7` **通过**。
+- 本轮决策全部进 `memory/DECISIONS.md`：**DEC-059 ~ DEC-065**（每条都有条目文件 + 索引行）。
