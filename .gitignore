@@ -8,3 +8,8 @@ core/tests/native/out/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# 设计期需求草图：设计记录不公开，它属于 project-memory，不进源码仓库
+sketch.md
+# PI-Desktop 宿主生成的会话/目标工件（每次会话都会重新生成）
+.pi/
