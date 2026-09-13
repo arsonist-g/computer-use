@@ -25,6 +25,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .. import subproc
 from ..errors import CUError, ErrorCode
 from . import omni
 
@@ -72,7 +73,7 @@ def _log(message: str) -> None:
 
 
 def _run(argv: list[str], *, env: dict | None = None, cwd: Path | None = None) -> int:
-    proc = subprocess.run(argv, env=env, cwd=str(cwd) if cwd else None,
+    proc = subproc.run(argv, env=env, cwd=str(cwd) if cwd else None,
                           capture_output=True, text=True, encoding="utf-8",
                           errors="replace")
     if proc.returncode != 0:
@@ -110,42 +111,150 @@ def _uv_install(python: Path, packages: tuple[str, ...]) -> None:
                   f"可用 {ENV_PYPI_MIRROR} 指定索引后重试。")
 
 
-def _download_weights(models: Path) -> None:
-    """下权重。**必须平铺**到目标目录 —— 这是 DEC-044 记的第三个坑。
+#: 在 **omni 环境**里执行的下载脚本（`python -c` 的源码）。
+#:
+#: **为什么不 in-process 调 `hf_hub_download`**：`huggingface_hub` 只装在
+#: `venv-omni` 里（见 `PACKAGES`），base 环境的声明依赖里没有它
+#: （`core/pyproject.toml` 只有 `windows-capture`）。在 base 环境里 import 它必然
+#: `ModuleNotFoundError`，而且那本身就违反 DEC-039（base 环境不 import 重依赖）。
+#: 所以这段逻辑必须由 `omni.omni_python()` 跑起来。
+#:
+#: 契约：stdin 收一份任务数组（JSON），每下完一个文件往 stdout 打一行
+#: `{"file": <相对 models 的路径>, "bytes": <字节数>}`；出错则非零退出并把原因
+#: 打到 stderr。**平铺落盘**的纠正（DEC-044 第三个坑）就在这段里 ——
+#: `hf_hub_download(local_dir=X)` 会保留 `filename` 里的目录，得靠 `shutil.move`
+#: 把文件搬到显式目标位置，否则权重落在嵌套层、远程代码落在平铺层，两边对不上。
+_DOWNLOAD_SCRIPT = r'''
+import json
+import shutil
+import sys
+import traceback
+from pathlib import Path
 
-    `hf_hub_download(filename="icon_caption/config.json", local_dir=X)` 会把文件
-    放到 `X/icon_caption/config.json`（filename 里的目录会被保留），于是权重落在
-    嵌套层、远程代码落在平铺层，两边对不上，模型加载失败。
-    正确做法是每个文件都显式指定它在目标目录里的**平铺**位置。
+
+def main() -> int:
+    tasks = json.loads(sys.stdin.read() or "[]")
+    from huggingface_hub import hf_hub_download
+
+    for task in tasks:
+        target = Path(task["target"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        got = Path(hf_hub_download(
+            repo_id=task["repo"],
+            filename=task["remote"],
+            revision=task.get("revision") or None,
+            local_dir=str(target.parent),
+        ))
+        if got.resolve() != target.resolve():
+            shutil.move(str(got), str(target))
+        print(json.dumps({"file": task["rel"], "bytes": target.stat().st_size},
+                         ensure_ascii=False), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception:
+        traceback.print_exc()
+        raise SystemExit(1)
+'''
+
+
+def _weight_tasks(models: Path) -> list[dict]:
+    """要下载的文件清单。每个任务的 `target` 是**平铺**后的最终位置。
+
+    拆成独立函数：单测与隔离验证可以只换一份小清单，走完全相同的下载路径
+    （同一个子进程脚本、同一套平铺纠正），不必真的下 1.4GB。
     """
+    caption_dir = models / "icon_caption_florence"
+    tasks = [{"repo": WEIGHTS_REPO, "remote": DETECTOR_FILE, "revision": DETECTOR_REVISION,
+              "target": models / "icon_detect_v3" / "model.pt",
+              "rel": "icon_detect_v3/model.pt"}]
+    for name in CAPTION_FILES:
+        tasks.append({"repo": WEIGHTS_REPO, "remote": f"icon_caption/{name}",
+                      "target": caption_dir / name,
+                      "rel": f"icon_caption_florence/{name}"})
+    # 远程代码：config.json 的 auto_map 指向它们，缺了就要联网找，离线/内网会失败。
+    for name in FLORENCE_REMOTE_FILES:
+        tasks.append({"repo": FLORENCE_REPO, "remote": name,
+                      "target": caption_dir / name,
+                      "rel": f"icon_caption_florence/{name}"})
+    return tasks
+
+
+def _parse_progress(line: str) -> dict | None:
+    """子进程 stdout 的一行是不是「一个文件下完了」的进度事件。"""
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(event, dict) and "file" in event and "bytes" in event:
+        return event
+    return None
+
+
+def _download_weights(models: Path) -> None:
+    """下权重。**在 omni 环境里执行**（见 `_DOWNLOAD_SCRIPT`），平铺落盘。
+
+    镜像：`HF_ENDPOINT` 由 `ENV_HF_MIRROR` 给出，透传给子进程。
+    """
+    python = omni.omni_python()
+    if not python.is_file():
+        raise CUError(
+            ErrorCode.OMNI_NOT_INSTALLED,
+            f"omni 环境不存在（{python}），无法下载权重；"
+            "先运行 `computer-use setup omni` 创建 venv-omni 并装依赖",
+        )
+
     endpoint = os.environ.get(ENV_HF_MIRROR) or ""
     env = dict(os.environ)
     if endpoint:
         env["HF_ENDPOINT"] = endpoint
         _log(f"使用 HuggingFace 镜像 {endpoint}")
+    # 进度条关掉：子进程的 stderr 并进了 stdout 一起读，tqdm 的 `\r` 进度会变成
+    # 上千行噪音，而这里每个文件只需要一条结论。
+    env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
 
-    from huggingface_hub import hf_hub_download
+    manifest = json.dumps(
+        [{"repo": t["repo"], "remote": t["remote"], "rel": t["rel"],
+          "target": str(t["target"]), "revision": t.get("revision")}
+         for t in _weight_tasks(models)],
+        ensure_ascii=False,
+    )
+    try:
+        proc = subproc.Popen(
+            [str(python), "-c", _DOWNLOAD_SCRIPT],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", env=env,
+        )
+    except OSError as exc:
+        raise CUError(ErrorCode.OMNI_NOT_INSTALLED,
+                      f"无法在 omni 环境里启动下载进程：{exc}",
+                      detail={"python": str(python)}) from exc
 
-    def fetch(repo: str, remote: str, target: Path, revision: str | None = None) -> None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        path = hf_hub_download(repo_id=repo, filename=remote, revision=revision,
-                               local_dir=str(target.parent))
-        got = Path(path)
-        if got.resolve() != target.resolve():
-            shutil.move(str(got), str(target))
-        _log(f"{target.relative_to(models)}  {target.stat().st_size / 1e6:.1f} MB")
-
-    _log("检测器（YOLOv9-E，来自 PR #37）")
-    fetch(WEIGHTS_REPO, DETECTOR_FILE, models / "icon_detect_v3" / "model.pt",
-          revision=DETECTOR_REVISION)
-
-    _log("描述模型（Florence-2）")
-    caption_dir = models / "icon_caption_florence"
-    for name in CAPTION_FILES:
-        fetch(WEIGHTS_REPO, f"icon_caption/{name}", caption_dir / name)
-    # 远程代码：config.json 的 auto_map 指向它们，缺了就要联网找，离线/内网会失败。
-    for name in FLORENCE_REMOTE_FILES:
-        fetch(FLORENCE_REPO, name, caption_dir / name)
+    tail: list[str] = []
+    assert proc.stdin is not None and proc.stdout is not None  # 上面就是 PIPE
+    proc.stdin.write(manifest)
+    proc.stdin.close()
+    for line in proc.stdout:
+        text = line.strip()
+        if not text:
+            continue
+        tail.append(text)          # 出错时要用最后几行解释原因
+        del tail[:-20]
+        event = _parse_progress(text)
+        if event is not None:
+            _log(f"{event['file']}  {event['bytes'] / 1e6:.1f} MB")
+    code = proc.wait()
+    if code != 0:
+        raise CUError(
+            ErrorCode.OMNI_NOT_INSTALLED,
+            "权重下载失败（在 venv-omni 环境里执行的下载脚本报错）",
+            detail={"returncode": code, "tail": " | ".join(tail[-6:])},
+        )
 
 
 def run_setup(*, force: bool = False, skip_weights: bool = False) -> dict:
@@ -209,7 +318,7 @@ def run_setup(*, force: bool = False, skip_weights: bool = False) -> dict:
     ready, reason = omni.available()
     if ready:
         # 用 worker 自己的检查逻辑，避免「检查代码」与「加载代码」漂移。
-        check = subprocess.run(
+        check = subproc.run(
             [str(python), str(omni.worker_script()), "--selftest"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
         )
@@ -228,7 +337,7 @@ def _venv_has(python: Path, modules: tuple[str, ...]) -> bool:
     """环境里有没有这几个模块。用 find_spec，不真正 import（省几秒）。"""
     script = ("import importlib.util as u,json,sys;"
               f"print(json.dumps([m for m in {list(modules)!r} if u.find_spec(m) is None]))")
-    proc = subprocess.run([str(python), "-c", script], capture_output=True,
+    proc = subproc.run([str(python), "-c", script], capture_output=True,
                           text=True, encoding="utf-8", errors="replace", timeout=120)
     if proc.returncode != 0:
         return False
