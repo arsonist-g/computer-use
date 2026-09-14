@@ -94,6 +94,8 @@ WM_SYSKEYDOWN = 0x0104
 WM_SYSKEYUP = 0x0105
 
 VK_ESCAPE = 0x1B
+#: ALT。抢前台的加码手段之一：注入一次 ALT 会被系统读作「用户发起前台切换」（DEC-081）。
+VK_MENU = 0x12
 
 #: 分层窗口（覆盖层）。`UpdateLayeredWindow` 是逐像素 alpha 的唯一上屏路径。
 SW_SHOWNOACTIVATE = 4
@@ -274,6 +276,8 @@ user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 user32.SetForegroundWindow.restype = wintypes.BOOL
 user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.AttachThreadInput.restype = wintypes.BOOL
+user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
 user32.ShowWindow.restype = wintypes.BOOL
 user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetDC.restype = wintypes.HDC

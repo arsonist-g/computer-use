@@ -291,22 +291,117 @@ def check_hwnd(hwnd: int, expect_pid: int | None = None,
     return WindowCheck(hwnd=hwnd, info=info)
 
 
+def _attach_to_the_foreground_thread() -> int:
+    """把本线程的输入队列挂到当前前台线程上，返回被挂的线程 id（0 = 没挂上）。
+
+    挂上之后系统把两者视作同一个输入上下文，「设置前台」这一步就不再被前台锁挡住。
+    调用方**必须**用 `_detach_from` 解挂 —— 不解挂等于我们的输入队列和别人的永久共享，
+    别人的输入会开始从这个进程过一遍。
+    """
+    foreground = w.foreground_hwnd()
+    if not foreground:
+        return 0
+    target = int(w.user32.GetWindowThreadProcessId(foreground, None))
+    mine = int(w.kernel32.GetCurrentThreadId())
+    if not target or target == mine:
+        return 0
+    if not w.user32.AttachThreadInput(target, mine, True):
+        return 0
+    return target
+
+
+def _detach_from(thread_id: int) -> None:
+    if thread_id:
+        w.user32.AttachThreadInput(thread_id, int(w.kernel32.GetCurrentThreadId()), False)
+
+
+def _send_alt(key_up: bool) -> None:
+    """注入一次 ALT 的按下（或抬起）。
+
+    这是 Windows 自己的判定：一次 ALT 按键被读作「用户想切换前台」，随后的
+    `SetForegroundWindow` 因此被放行。注入而不是等用户去按 —— 写序列期间物理输入
+    已经被钩子吞掉，用户按不出来。
+    """
+    flags = w.KEYEVENTF_KEYUP if key_up else 0
+    item = w.INPUT(type=w.INPUT_KEYBOARD,
+                   ki=w.KEYBDINPUT(wVk=w.VK_MENU, wScan=0, dwFlags=flags,
+                                   time=0, dwExtraInfo=None))
+    w.user32.SendInput(1, ctypes.byref(item), ctypes.sizeof(w.INPUT))
+
+
+def _give_focus(hwnd: int) -> None:
+    """把键盘焦点交给目标窗口 —— 抢到前台**不等于**焦点进了它里面。
+
+    真机实测（Win11 记事本、同进程多窗口）：`SetForegroundWindow` 把窗口带到最前后，
+    焦点停在该应用自己的 `InputSiteWindowClass` 上，不在真正的输入控件里 —— 紧接着发的
+    `ctrl+a` 因此一个字符都没选中；下一次调用时系统才把它修正。对照实验里，抢完前台补一次
+    `SetFocus`，第一次就成了。
+
+    `SetFocus` 只能跨线程用在**同一条输入队列**上，所以这里同样先 attach 目标线程。
+    焦点是窗口自己的属性，解挂之后仍然留着。
+    """
+    target = int(w.user32.GetWindowThreadProcessId(hwnd, None))
+    mine = int(w.kernel32.GetCurrentThreadId())
+    if not target or target == mine:
+        return
+    if not w.user32.AttachThreadInput(target, mine, True):
+        return
+    try:
+        w.user32.SetFocus(hwnd)
+    finally:
+        w.user32.AttachThreadInput(target, mine, False)
+
+
 def bring_to_foreground(hwnd: int) -> None:
     """把目标窗口提到前台并**确认成功**（DEC-013 第 2 层）。
 
     不确认的话，点击会落到当时真正的前台窗口上 —— Windows 的输入是发给前台窗口的，
     不是发给「你心里想的那个窗口」的。这正是 DEC-013 记录的第 1 个失效模式。
+
+    **前台不在我们手里时一次抢不到**：改前台的权利属于「最近一次收到真实输入的进程」，
+    其余的进程会被系统拒绝（本机 `ForegroundLockTimeout` 实测 200000ms）。所以这里
+    三级加码、每级都验证（DEC-081）：
+
+    1. 直接 `SetForegroundWindow` —— 前台本来就归我们时一步到位；
+    2. 先 `AttachThreadInput` 挂到当前前台线程，再抢，然后**无论成败都解挂**；
+    3. 注入一次 ALT（系统读作「用户发起」）并按住，再抢一次。
+
+    三级都不成才抛 `foreground_failed` —— **绝不退化成「就当它在前台了」**：
+    那正是会点到别人窗口上的那条路。
+
+    抢到之后还有最后一步：**把焦点交给它**（`_give_focus`）。前台管「谁在最前」，
+    焦点管「按键进谁」—— 少了这一步，输入进了目标进程却没进它里面的输入框。
+
+    可以这样强抢的前提是写序列期间物理输入已被钩子吞掉（DEC-030）：焦点被拿走时，
+    用户此刻的按键不会落进目标窗口。
     """
     if w.foreground_hwnd() == hwnd:
+        _give_focus(hwnd)
         return
     w.user32.ShowWindow(hwnd, w.SW_RESTORE)
-    w.user32.SetForegroundWindow(hwnd)
+    if w.user32.SetForegroundWindow(hwnd) and w.foreground_hwnd() == hwnd:
+        _give_focus(hwnd)
+        return
+
+    attached = _attach_to_the_foreground_thread()
+    try:
+        w.user32.SetForegroundWindow(hwnd)
+        if w.foreground_hwnd() != hwnd:
+            _send_alt(False)
+            try:
+                w.user32.SetForegroundWindow(hwnd)
+            finally:
+                _send_alt(True)
+    finally:
+        _detach_from(attached)
+
     if w.foreground_hwnd() != hwnd:
         from ..ids import format_hwnd
 
         raise CUError(ErrorCode.FOREGROUND_FAILED,
                       f"无法把窗口提到前台：{format_hwnd(hwnd)}",
                       {"hwnd": format_hwnd(hwnd)})
+    _give_focus(hwnd)
 
 
 def all_monitors() -> Iterable[MonitorInfo]:

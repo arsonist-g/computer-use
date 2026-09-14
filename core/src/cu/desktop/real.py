@@ -129,6 +129,8 @@ class RealDesktop:
 
     def move(self, x: int, y: int, *, hwnd: int | None = None,
              expect: WindowIdentity | None = None) -> InputResult:
+        # 只移光标**不抢前台**：悬停响应看光标落在哪个窗口上，与前台无关；
+        # 而移动光标本身不该把用户手上的窗口顶下去。
         self._preflight(hwnd, expect, foreground=False)
         moved = input_mod.move_cursor(x, y, step_ms=self.config.mouse_step_ms,
                                       max_points=self.config.mouse_max_points)
@@ -151,7 +153,10 @@ class RealDesktop:
 
     def key(self, combo: str, *, hwnd: int | None = None, force: bool = False,
             expect: WindowIdentity | None = None) -> InputResult:
-        self._preflight(hwnd, expect, foreground=False)
+        # 按键的落点是**发键那一刻的前台窗口**，所以带 `--hwnd` 时必须先抢前台：
+        # 不抢就等于把 `ctrl+a` / `delete` 投给用户手上那个窗口（api-contract.md §1.3，
+        # `--hwnd` 用于写操作前置校验）。
+        self._preflight(hwnd, expect)
         return input_mod.key(combo, force=force,
                              danger_keys=frozenset(self.config.danger_keys))
 
