@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "Windows desktop control for AI agents: screens, windows, mouse, keyboard, and structured UI parsing",
   "license": "MIT",
+  "author": "arsonist-g",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arsonist-g/computer-use.git"
+  },
   "type": "module",
   "bin": {
     "computer-use": "bin/computer-use.mjs"
@@ -16,11 +21,14 @@
     "skill/"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "os": [
     "win32"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "ai",
     "agent",
