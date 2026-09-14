@@ -88,7 +88,6 @@ def _uv() -> str:
         raise CUError(
             ErrorCode.OMNI_NOT_INSTALLED,
             "uv 未安装，无法创建隔离环境（DEC-018 明确不退回系统 pip）",
-            hint="安装：irm https://astral.sh/uv/install.ps1 | iex",
         )
     return found
 

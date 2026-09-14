@@ -107,7 +107,6 @@ def call_parse(*, image_path: str, out_dir: Path, file_name: str, ai: bool,
         raise CUError(
             ErrorCode.OMNI_NOT_INSTALLED,
             f"OmniParser 未安装：{reason}",
-            hint="运行 `computer-use setup omni` 完成安装",
         )
 
     python = omni_python()
