@@ -89,6 +89,14 @@ class CaptureResult:
     kind: str = "window"        # window | full
     window: WindowInfo | None = None
     inline_base64: str | None = None
+    #: 光标位置（屏幕绝对物理像素）。**默认就报**，不是可选：光标长什么样是图形的事
+    #: （箭头 / 输入框里的工字梁），它在哪是坐标的事 —— 后者必须给准数。
+    cursor: tuple[int, int] | None = None
+    #: 光标是否落在**这张图覆盖的矩形**里。窗口截图时即「是否在该窗口内」。
+    cursor_inside: bool | None = None
+    #: 请求在图上画光标红框时，这一张的结果：`drawn` / `outside`（光标不在图内，
+    #: 按约定不画）/ `unsupported`（这一层给不出能改写的帧缓冲）。没请求时为空串。
+    cursor_marker: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -98,6 +106,12 @@ class CaptureResult:
             "height": self.height,
             "layer": self.layer,
         }
+        if self.cursor is not None:
+            out["cursor"] = list(self.cursor)
+        if self.cursor_inside is not None:
+            out["cursor_inside"] = self.cursor_inside
+        if self.cursor_marker:
+            out["cursor_marker"] = self.cursor_marker
         if self.inline_base64 is not None:
             out["base64"] = self.inline_base64
         return out
@@ -148,7 +162,7 @@ class Desktop(Protocol):
     def display_context(self): ...
 
     def capture(self, *, hwnd: int | None, monitor: int | None, image_format: str,
-                out_dir, seq: int) -> CaptureResult: ...
+                out_dir, seq: int, draw_cursor: bool = False) -> CaptureResult: ...
 
     def parse(self, *, hwnd: int | None, image_path: str | None, ai: bool,
               out_dir, seq: int) -> ParseResult: ...

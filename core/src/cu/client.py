@@ -133,6 +133,8 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--full", action="store_true", help="截主显示器全屏")
     shot.add_argument("--monitor", type=int, default=None, help="配合 --full，指定显示器序号")
     shot.add_argument("--format", default=None, choices=["png", "webp"], help="图片格式")
+    shot.add_argument("--cursor", action="store_true", dest="draw_cursor",
+                      help="在截图里用红框框出光标位置（默认不画；光标坐标始终返回）")
 
     parse = add("parse", "把图片解析成结构化数据（OmniParser）")
     parse_target = parse.add_mutually_exclusive_group(required=True)
@@ -234,7 +236,8 @@ def to_request(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         else:
             params = {"monitor": args.monitor if args.monitor is not None else 0}
         params.update({"session_id": session_id, "format": args.format,
-                       "inline": args.inline, "describe": args.describe})
+                       "inline": args.inline, "describe": args.describe,
+                       "cursor": bool(args.draw_cursor)})
         return "desktop.capture", params
     if command == "parse":
         return "omni.parse", {"hwnd": args.hwnd, "image": args.image, "ai": args.ai,
@@ -373,8 +376,16 @@ def render_text(command: str, result: Any, verbose: bool = False) -> str:
         return "\n".join(lines)
     if command == "screenshot":
         ox, oy = result["origin"]
-        return (f"{Path(result['path']).name}  {result['width']}x{result['height']}  "
+        text = (f"{Path(result['path']).name}  {result['width']}x{result['height']}  "
                 f"origin={ox},{oy}  layer={result['layer']}")
+        if result.get("cursor") is not None:
+            cx, cy = result["cursor"]
+            text += f"  cursor={cx},{cy}"
+        if result.get("cursor_inside") is not None:
+            text += f"  cursor_inside={'true' if result['cursor_inside'] else 'false'}"
+        if result.get("cursor_marker"):
+            text += f"  cursor_marker={result['cursor_marker']}"
+        return text
     if command == "parse":
         tail = f"  model={result['model_name']}" if result.get("model_name") else ""
         return f"{Path(result['path']).name}  elements={result['element_count']}{tail}"

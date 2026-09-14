@@ -38,10 +38,11 @@ class RealDesktop:
         return windows_mod.display_context()
 
     def capture(self, *, hwnd: int | None, monitor: int | None, image_format: str,
-                out_dir: Path, seq: int) -> CaptureResult:
+                out_dir: Path, seq: int, draw_cursor: bool = False) -> CaptureResult:
         if hwnd is None:
             return capture_mod.capture_full(
-                monitor if monitor is not None else 0, out_dir, seq, image_format)
+                monitor if monitor is not None else 0, out_dir, seq, image_format,
+                draw_cursor=draw_cursor)
         # 窗口信息要写进清单（`Screenshot.window` 是复盘时的现场证据，DEC-006）。
         monitors = windows_mod.display_context().monitors
         info = next((w for w in windows_mod.enumerate_windows(monitors) if w.hwnd == hwnd), None)
@@ -50,7 +51,10 @@ class RealDesktop:
 
             raise CUError(ErrorCode.WINDOW_NOT_FOUND,
                           f"窗口不存在：{format_hwnd(hwnd)}", {"hwnd": format_hwnd(hwnd)})
-        return capture_mod.capture_window(hwnd, out_dir, seq, info, image_format)
+        # 红框与坐标换算都留在 capture_window 里做：窗口原点是它算出来的
+        # （DWM 扩展框），在外面二次换算等于把那条已经踩过的偏移再踩一遍。
+        return capture_mod.capture_window(hwnd, out_dir, seq, info, image_format,
+                                          draw_cursor=draw_cursor)
 
     def parse(self, *, hwnd: int | None, image_path: str | None, ai: bool,
               out_dir: Path, seq: int) -> ParseResult:
@@ -134,7 +138,8 @@ class RealDesktop:
         self._preflight(hwnd, expect, foreground=False)
         moved = input_mod.move_cursor(x, y, step_ms=self.config.mouse_step_ms,
                                       max_points=self.config.mouse_max_points)
-        return InputResult(ok=True, moved_ms=moved, total_ms=moved)
+        return InputResult(ok=True, moved_ms=moved, total_ms=moved,
+                           detail=input_mod.cursor_snapshot())
 
     def drag(self, x1: int, y1: int, x2: int, y2: int, *, button: str = "left",
              hwnd: int | None = None, expect: WindowIdentity | None = None) -> InputResult:

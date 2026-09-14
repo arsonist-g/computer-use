@@ -41,6 +41,10 @@ WS_EX_TOPMOST = 0x00000008
 
 SW_RESTORE = 9
 
+#: 系统光标位图的尺寸（`GetSystemMetrics`）—— 红框标记按它画，才叫「鼠标大小」。
+SM_CXCURSOR = 13
+SM_CYCURSOR = 14
+
 DWMWA_CLOAKED = 14
 DWMWA_EXTENDED_FRAME_BOUNDS = 9
 
@@ -483,3 +487,13 @@ def cursor_pos() -> tuple[int, int]:
     point = POINT()
     user32.GetCursorPos(ctypes.byref(point))
     return (point.x, point.y)
+
+
+def cursor_size() -> tuple[int, int]:
+    """系统光标位图的尺寸（物理像素）。
+
+    `SM_CXCURSOR` / `SM_CYCURSOR` 直接反映系统设置里「鼠标指针大小」那一档；
+    daemon 是 per-monitor-v2 感知的，拿到的就是本机缩放后的实际像素尺寸。
+    """
+    return (int(user32.GetSystemMetrics(SM_CXCURSOR)),
+            int(user32.GetSystemMetrics(SM_CYCURSOR)))

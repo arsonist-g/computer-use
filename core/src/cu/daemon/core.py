@@ -354,6 +354,7 @@ class Daemon:
             hwnd=hwnd, monitor=monitor,
             image_format=params.get("format") or self.config.image_format,
             out_dir=session.directory, seq=seq,
+            draw_cursor=bool(params.get("cursor")),
         )
         self.sessions.add_screenshot(session_id, ScreenshotRecord(
             seq=seq,

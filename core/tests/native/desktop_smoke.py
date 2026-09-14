@@ -197,7 +197,7 @@ def _window_info(hwnd: int):
 
 def t4_input() -> None:
     """轨迹与落点：终点必须精确命中，中间点必须真的分散（否则「拟人」是假的）。"""
-    start = input_mod._last_tracked
+    start = input_mod.w.cursor_pos()
     points = input_mod.trajectory(start[0], start[1], 600, 400, max_points=30)
     endpoints_ok = points[0] == (round(start[0]), round(start[1])) is not None
     distinct = len(set(points))

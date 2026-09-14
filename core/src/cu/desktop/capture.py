@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..errors import CUError, ErrorCode
@@ -72,6 +73,98 @@ def _wc_monitor_index(monitor_index: int) -> int:
     return monitor_index + 1
 
 
+# ---------------------------------------------------------------------------
+# 光标标记（`screenshot --cursor`）
+# ---------------------------------------------------------------------------
+
+#: 红框线宽（物理像素）。1px 在深色界面上会糊，2px 才稳。
+_MARKER_THICKNESS = 2
+#: 红框颜色。帧缓冲是 windows-capture 交付的原始 **BGRA** 布局，不是 RGB。
+_MARKER_COLOR = (0, 0, 255, 255)
+
+
+@dataclass
+class _CursorMark:
+    """要不要在帧上画光标红框，以及这一层画成了没有。
+
+    帧缓冲只在**取帧回调内部**可写（保存读的就是那块内存），而图像原点是
+    对外入口才知道的，所以这两样东西要一起递进回调。
+    """
+
+    origin: tuple[int, int]
+    size: tuple[int, int]
+    result: str = ""
+
+
+def marker_box(cursor: tuple[int, int], origin: tuple[int, int], width: int, height: int,
+               size: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """光标红框在**图像坐标**里的位置；光标不在图内时返回 None。
+
+    全项目只有这一处「屏幕坐标 → 图像坐标」的减法，所以它单独成一个纯函数、单独测。
+    减 `origin` **之前**必须先判光标在不在图内：先减再判，一个远在图外的光标会被
+    平移进图里，于是在图上画出一个并不存在的光标。
+
+    返回 `(x0, y0, x1, y1)`，右下为开区间，已夹进图像范围。
+    """
+    cx, cy = cursor
+    ox, oy = origin
+    if not (ox <= cx < ox + width and oy <= cy < oy + height):
+        return None
+    half_w = max(1, size[0] // 2)
+    half_h = max(1, size[1] // 2)
+    x0 = min(max(cx - ox - half_w, 0), max(width - 1, 0))
+    y0 = min(max(cy - oy - half_h, 0), max(height - 1, 0))
+    x1 = min(max(cx - ox + half_w + 1, x0 + 1), width)
+    y1 = min(max(cy - oy + half_h + 1, y0 + 1), height)
+    return (x0, y0, x1, y1)
+
+
+def paint_marker(buffer, box: tuple[int, int, int, int]) -> None:
+    """在帧缓冲上画一个空心红框。**就地改写** —— 保存读的就是这块内存。
+
+    只用切片赋值、不 import numpy：缓冲区本来就是 windows-capture 交付的零拷贝
+    数组（DEC-039 禁的是在 base 环境 import 重型库，不是「不能用已经拿到的数组」）。
+    """
+    x0, y0, x1, y1 = box
+    buffer[y0:y0 + _MARKER_THICKNESS, x0:x1] = _MARKER_COLOR
+    buffer[y1 - _MARKER_THICKNESS:y1, x0:x1] = _MARKER_COLOR
+    buffer[y0:y1, x0:x0 + _MARKER_THICKNESS] = _MARKER_COLOR
+    buffer[y0:y1, x1 - _MARKER_THICKNESS:x1] = _MARKER_COLOR
+
+
+def _writable_buffer(frame):
+    """这块帧能改写的缓冲。WGC 的 Frame 直接给 `frame_buffer`；DXGI 的帧只有
+    `to_numpy()`（它会把结果缓存下来，随后保存读的是同一块内存）。"""
+    buffer = getattr(frame, "frame_buffer", None)
+    return frame.to_numpy() if buffer is None else buffer
+
+
+def _mark_cursor(frame, origin: tuple[int, int], size: tuple[int, int]) -> str:
+    """按光标当前位置在帧上画红框，返回这次的结果口径。"""
+    box = marker_box(w.cursor_pos(), origin, int(frame.width), int(frame.height), size)
+    if box is None:
+        return "outside"
+    try:
+        paint_marker(_writable_buffer(frame), box)
+    except Exception:  # noqa: BLE001 —— 标记画不上不该毁掉这张截图，但必须如实报出来
+        return "unsupported"
+    return "drawn"
+
+
+def _finish(result: CaptureResult, mark: _CursorMark | None, marker: str = "") -> CaptureResult:
+    """把「光标在哪、在不在图里、红框画没画上」并进截图结果。
+
+    光标坐标默认就报：调用方据此判断落点，而图里那根工字梁是靠不住的视觉证据。
+    """
+    cx, cy = w.cursor_pos()
+    result.cursor = (int(cx), int(cy))
+    result.cursor_inside = (result.origin[0] <= cx < result.origin[0] + result.width
+                            and result.origin[1] <= cy < result.origin[1] + result.height)
+    if mark is not None:
+        result.cursor_marker = marker or mark.result or "unsupported"
+    return result
+
+
 def _save(frame, path: Path) -> None:
     """发起保存。**不等落盘** —— 编码是异步的。
 
@@ -105,7 +198,8 @@ def _await_file(path: Path, timeout: float = 5.0) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _capture_wgc_window(hwnd: int, path: Path) -> tuple[int, int]:
+def _capture_wgc_window(hwnd: int, path: Path,
+                        mark: _CursorMark | None = None) -> tuple[int, int]:
     from windows_capture import WindowsCapture
 
     capture = WindowsCapture(window_hwnd=hwnd, cursor_capture=True, draw_border=False)
@@ -125,6 +219,8 @@ def _capture_wgc_window(hwnd: int, path: Path) -> tuple[int, int]:
                 done.set()
             return
         try:
+            if mark is not None:
+                mark.result = _mark_cursor(frame, mark.origin, mark.size)
             _save(frame, path)
             captured["size"] = (frame.width, frame.height)
         except BaseException as exc:  # noqa: BLE001
@@ -152,7 +248,8 @@ def _capture_wgc_window(hwnd: int, path: Path) -> tuple[int, int]:
     return captured["size"]
 
 
-def _capture_wgc_monitor(monitor_index: int, path: Path) -> tuple[int, int]:
+def _capture_wgc_monitor(monitor_index: int, path: Path,
+                         mark: _CursorMark | None = None) -> tuple[int, int]:
     from windows_capture import WindowsCapture
 
     capture = WindowsCapture(monitor_index=_wc_monitor_index(monitor_index),
@@ -173,6 +270,8 @@ def _capture_wgc_monitor(monitor_index: int, path: Path) -> tuple[int, int]:
                 done.set()
             return
         try:
+            if mark is not None:
+                mark.result = _mark_cursor(frame, mark.origin, mark.size)
             _save(frame, path)
             captured["size"] = (frame.width, frame.height)
         except BaseException as exc:  # noqa: BLE001
@@ -206,7 +305,7 @@ def _capture_wgc_monitor(monitor_index: int, path: Path) -> tuple[int, int]:
 
 
 def _capture_dxgi(monitor_index: int, crop: tuple[int, int, int, int] | None,
-                  path: Path) -> tuple[int, int]:
+                  path: Path, mark: _CursorMark | None = None) -> tuple[int, int]:
     """DXGI 取帧。`crop` 非空时裁出窗口区域（窗口截图走这条）。
 
     spike 陷阱 4：新建会话后立刻取帧可能是整帧全黑，必须**丢弃黑帧并循环重试**，
@@ -235,6 +334,8 @@ def _capture_dxgi(monitor_index: int, crop: tuple[int, int, int, int] | None,
                 raise CaptureLayerError("DXGI 持续返回全黑帧")
             continue
         try:
+            if mark is not None:
+                mark.result = _mark_cursor(frame, mark.origin, mark.size)
             _save(frame, path)
         except Exception as exc:  # noqa: BLE001
             raise CaptureLayerError(f"DXGI 保存失败：{exc}") from exc
@@ -253,7 +354,8 @@ def _capture_dxgi(monitor_index: int, crop: tuple[int, int, int, int] | None,
 
 
 def capture_window(hwnd: int, out_dir: Path, seq: int, window: WindowInfo,
-                   image_format: str = "png") -> CaptureResult:
+                   image_format: str = "png",
+                   draw_cursor: bool = False) -> CaptureResult:
     """按 hwnd 截图，走降级链。
 
     `origin` 取 **DWM 扩展框**（`extended_frame_bounds`）的左上角，不是 `GetWindowRect`。
@@ -281,17 +383,22 @@ def capture_window(hwnd: int, out_dir: Path, seq: int, window: WindowInfo,
     path = out_dir / name
 
     failures: list[str] = []
+    mark = _CursorMark(origin=origin, size=w.cursor_size()) if draw_cursor else None
     try:
-        width, height = _capture_wgc_window(hwnd, path)
-        return CaptureResult(path=str(path), origin=origin, width=width, height=height,
-                             layer="wgc", kind="window", window=window)
+        width, height = _capture_wgc_window(hwnd, path, mark)
+        return _finish(CaptureResult(path=str(path), origin=origin, width=width, height=height,
+                                     layer="wgc", kind="window", window=window), mark)
     except Exception as exc:  # noqa: BLE001
         failures.append(f"WGC: {exc}")
 
     try:
+        # DXGI 这一层存的是**整个显示器**（它没有 crop），图像原点不是窗口原点 ——
+        # 拿窗口原点去画红框会画到别的地方，所以这一层不画（记 `unsupported`），
+        # 但光标坐标与「在不在图内」照报。
         width, height = _capture_dxgi(window.monitor, rect, path)
-        return CaptureResult(path=str(path), origin=origin, width=width, height=height,
-                             layer="dxgi", kind="window", window=window)
+        return _finish(CaptureResult(path=str(path), origin=origin, width=width, height=height,
+                                     layer="dxgi", kind="window", window=window),
+                       mark, marker="unsupported")
     except Exception as exc:  # noqa: BLE001
         failures.append(f"DXGI: {exc}")
 
@@ -303,7 +410,8 @@ def capture_window(hwnd: int, out_dir: Path, seq: int, window: WindowInfo,
 
 
 def capture_full(monitor_index: int, out_dir: Path, seq: int,
-                 image_format: str = "png") -> CaptureResult:
+                 image_format: str = "png",
+                 draw_cursor: bool = False) -> CaptureResult:
     """全屏截图 = 主显示器一张（DEC-009 / DEC-010）。
 
     全屏截图的 `origin` 恒为 (0,0)：坐标系原点就是主显示器左上角（DEC-001）。
@@ -322,17 +430,18 @@ def capture_full(monitor_index: int, out_dir: Path, seq: int,
     path = out_dir / name
 
     failures: list[str] = []
+    mark = _CursorMark(origin=origin, size=w.cursor_size()) if draw_cursor else None
     try:
-        width, height = _capture_wgc_monitor(monitor_index, path)
-        return CaptureResult(path=str(path), origin=origin, width=width, height=height,
-                             layer="wgc", kind="full", window=None)
+        width, height = _capture_wgc_monitor(monitor_index, path, mark)
+        return _finish(CaptureResult(path=str(path), origin=origin, width=width, height=height,
+                                     layer="wgc", kind="full", window=None), mark)
     except Exception as exc:  # noqa: BLE001
         failures.append(f"WGC: {exc}")
 
     try:
-        width, height = _capture_dxgi(monitor_index, None, path)
-        return CaptureResult(path=str(path), origin=origin, width=width, height=height,
-                             layer="dxgi", kind="full", window=None)
+        width, height = _capture_dxgi(monitor_index, None, path, mark)
+        return _finish(CaptureResult(path=str(path), origin=origin, width=width, height=height,
+                                     layer="dxgi", kind="full", window=None), mark)
     except Exception as exc:  # noqa: BLE001
         failures.append(f"DXGI: {exc}")
 

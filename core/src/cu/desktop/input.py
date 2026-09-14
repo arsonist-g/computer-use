@@ -8,6 +8,9 @@
 坐标系（屏幕绝对物理像素，不是视口坐标）、事件结构、节奏控制全部不同。
 逐点 `SetCursorPos` 是错的：那会绕过输入队列，某些应用看到的是「光标瞬移」而非鼠标移动。
 
+**位置的事实来源永远是现读的 `GetCursorPos`**，不是「上次我把它放哪了」的缓存 ——
+人随时在动鼠标，缓存一过期，移动就成了静默空操作，而按钮事件落在光标实际所在处。
+
 难度键黑名单在这里执行（DEC-019）。**不提供二次确认**，只提供 `--force` 越过 ——
 CLI 无法可靠识别「危险类别」，误判要么形同虚设要么频繁打断。
 """
@@ -171,20 +174,35 @@ def _key_input(vk: int, flags: int = 0, scan: int = 0) -> w.INPUT:
                    ki=w.KEYBDINPUT(wVk=vk, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=None))
 
 
-# 轨迹起点：与参考实现的 `_last_tracked_pos` 同款，初始 (0,0)。
-_last_tracked: tuple[float, float] = (0.0, 0.0)
+def cursor_now() -> tuple[float, float]:
+    """光标的**真实**位置（屏幕绝对物理像素）。
+
+    这是写操作落点唯一的事实来源：按钮事件不带坐标，落在「光标当前在哪」。
+    所以「上次我把它放哪儿了」这种缓存不能当位置用 —— 人一直在动鼠标。
+    """
+    x, y = w.cursor_pos()
+    return (float(x), float(y))
+
+
+def cursor_snapshot() -> dict:
+    """操作结束后的光标读数，进结果的 `cursor` 字段（`[x, y]`）。
+
+    每条鼠标命令都报一次：调用方不必再猜「它到底落在哪了」。
+    """
+    x, y = cursor_now()
+    return {"cursor": [int(x), int(y)]}
 
 
 def move_cursor(x: int, y: int, step_ms: int = 10, max_points: int = 30) -> int:
-    """从上次落点拟人移动到 (x, y)。返回耗时毫秒。
+    """从光标**当前真实位置**拟人移动到 (x, y)。返回耗时毫秒。
 
     中间点固定间隔，跳过轨迹首尾（起点已经在那里了，终点随后精确派发）。
     """
-    global _last_tracked
     start = time.monotonic()
-    if round(x) == round(_last_tracked[0]) and round(y) == round(_last_tracked[1]):
+    origin = cursor_now()
+    if round(x) == round(origin[0]) and round(y) == round(origin[1]):
         return 0
-    points = trajectory(_last_tracked[0], _last_tracked[1], x, y, max_points)
+    points = trajectory(origin[0], origin[1], x, y, max_points)
     for px, py in points[1:-1]:
         nx, ny = _normalize(px, py)
         _send(_mouse_input(w.MOUSEEVENTF_MOVE | w.MOUSEEVENTF_ABSOLUTE | w.MOUSEEVENTF_VIRTUALDESK,
@@ -194,7 +212,6 @@ def move_cursor(x: int, y: int, step_ms: int = 10, max_points: int = 30) -> int:
     nx, ny = _normalize(x, y)
     _send(_mouse_input(w.MOUSEEVENTF_MOVE | w.MOUSEEVENTF_ABSOLUTE | w.MOUSEEVENTF_VIRTUALDESK,
                        nx, ny))
-    _last_tracked = (float(x), float(y))
     return int((time.monotonic() - start) * 1000)
 
 
@@ -215,7 +232,8 @@ def click(x: int, y: int, *, button: str = "left", count: int = 1,
         time.sleep(random.uniform(*_PRESS_S))
         _send(_mouse_input(up))
     return InputResult(ok=True, moved_ms=moved_ms,
-                       total_ms=int((time.monotonic() - started) * 1000))
+                       total_ms=int((time.monotonic() - started) * 1000),
+                       detail=cursor_snapshot())
 
 
 def drag(x1: int, y1: int, x2: int, y2: int, *, button: str = "left",
