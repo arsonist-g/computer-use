@@ -54,4 +54,4 @@ uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
 
 ## 设计文档
 
-设计不在本仓库（源码公开、设计记录不公开）。需要时问维护者要 `project-memory`。
+设计不在本仓库（源码公开、设计记录不公开）。需要时向维护者索取。
