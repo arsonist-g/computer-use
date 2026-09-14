@@ -387,9 +387,35 @@ F7b / F8 / F9）；剩下 5 条（F1 / F4 / F5 / F10 / F11）于同日处置完�
 | E8 | 键盘 | `ctrl+s` 弹出「另存为」（组合键确实到达应用）；`alt+tab` 把前台从记事本切到 VS Code；**自发的 `key esc` 返回 ok 且不进中止路径**（注入事件带 `LLKHF_INJECTED`，钩子无条件放行）；`win+l` 不带 `--force` 报 `dangerous_key_blocked`（exit=2），且失败那次也落了 `ops.md`（DEC-006）✅ |
 | E10 | 并发与写锁 | 同会话重入（连发多条写命令不互斥）；**另一会话**的写命令等满 `lock_wait_seconds`=10s 后 `lock_timeout`（exit=3，`detail` 带 `holder_session` / `holder_pid` / `held_for_s`）；等待期间 `lock status` 报 `waiting_sessions`；`lock unlock --force --reason` 真正释放，并同时写 daemon 日志与会话 `ops.md` ✅ |
 | E11 | daemon 生命周期 | 阈值临时压到 8s：两次独立实例都按阈值空闲退出（日志 `idle_for_s=8.0` / `9.9`）；**有活跃会话**或**覆盖层在场**（0 会话）时静置 14s 均不退出（硬不变式）；覆盖层退场后输入自动放行；硬杀进程后无残留管道，`daemon.lock` 只留一个诊断用 pid（文件锁由内核释放）✅ |
-| E12 | scroll | VS Code 编辑区顶行从 143 变 148（`scroll 0 -5`）✅ |
-| E9 | 物理 Esc 中止 | ⬜ **待跑**（须人手按物理键；合成输入带 `LLKHF_INJECTED`，程序造不出） |
-| E13 | QQ 群消息（用户指定） | ⬜ **待跑**（真实群、消息不可撤回，须用户在场确认） |
+| E7b | scroll | VS Code 编辑区顶行从 143 变 148（`scroll 0 -5`）✅（**改号**：原表误记为 E12，与下面那条 QQ 冲突） |
+| E5b | 截图的光标读数与红框（本轮新增） | `--full` 默认回 `cursor=1500,700` · `cursor_inside=true`；带 `--cursor` 后 `cursor_marker=drawn`，图里红框的像素范围 x 1484..1516 / y 684..716 与光标 (1500,700) 逐点对得上。**光标移到窗口外**：`cursor_inside=false` · `cursor_marker=outside`，整幅图的纯红像素计数与同一窗口**不带 `--cursor`** 那张**完全相同**（1717 = 1717）—— 图外不画成立 ✅ |
+| E9 | 物理 Esc 中止 | ✅ **由既有真机证据回填**（用户确认口径，见下）：`§1.1a` / `§1.2` 两次人眼验收（6.8s / 6.4s）都由**物理 Esc** 解除封锁，不是看门狗兜底 |
+| E12 | QQ 群消息（用户指定） | ✅ **主路径通过**：一条 `type`（含 `\n`）→ 输入框里是 9 行 → `key enter` → 群里收到**一条多行消息**（单气泡、时间戳 18:20）。对照路径未跑（见下） |
+
+### E9 回填（2026-09-14 · 依据 2026-09-12 的既有真机验收）
+
+- 证据：`§1.1a` 与 `§1.2`（本文件第 1 节）—— 2026-09-12 人眼验收，**两次**都由物理 Esc 解除输入封锁
+  （6.8s / 6.4s，不是看门狗兜底）；同批 `§1.1b` / `§1.3` / `§1.4` / `§1.5` 全过。另有
+  `tmp-doc/2026-09-12/guided-acceptance-result.md`（通过 2 · 失败 0）与记忆库
+  `task-tracker/done-2026-09-12-computer-use-core-progress.md`（13 通过 / 1 失败，§1 六项全通过）。
+- **那一批验的是「封锁能被物理 Esc 解除」**。DEC-068 之后中止改成「只拒绝**一条**」的一次性闸门，
+  那套语义**没有在真机上单独跑过**（合成输入带 `LLKHF_INJECTED`，程序造不出物理 Esc）——
+  `## 中止语义` 一节里的 ⬜ 是它的准确状态，本节不替它作证。
+
+### E12 QQ 群消息（2026-09-14 · 要回答的是「换行怎么落地、Enter 是不是发送」）
+
+- **主路径（通过）**：一条 `type` 把整张 99 乘法表（337 字符 / 9 行 / 8 个 `\n`）插进输入框 ——
+  `via=clipboard` · `reason=newline` · `clipboard_restored=true`；逐字节核对（`key ctrl+a` → `key ctrl+c`
+  → 读剪贴板）**337 = 337，完全一致**。截图确认输入框里确实是**多行**；`key enter` 之后群里收到
+  **一条多行消息**（单气泡、9 行、时间戳 18:20），输入框随之清空。
+  ⟹ DEC-077 的分工在真实应用上成立：`type` 的 `\n` 是**字面量换行**，Enter 由 `key` 单独发。
+- **对照路径（未跑）**：逐行 `type` + `key ctrl+enter` 拼多行再 `key enter` 发送。本轮计划自己写着
+  「第 2 步之前再确认一次，别刷屏」，未获再次放行，因此**未执行**。
+  **推断（非实测）**：本轮那次 `key enter` 真的把消息发了出去 ⟹ 这个 QQ 是「Enter 发送」档；
+  而发送键是「Enter 发送 / Ctrl+Enter 发送」二选一 ⟹ 此时 Ctrl+Enter 应当是**换行**。
+- **顺带发现**：「报成功但没生效」在这条链路上真的出现过 —— 那几次 `key enter` 每条都报 `ok`，
+  却根本没到 QQ（落在编辑器上），因为它们前面那次 `click` 并没有真的移动鼠标（缺陷 H5）。
+  这条链路的复核只能靠**截图看现场**，不能靠返回码。
 
 ### 本轮闭合的两条「未验证」项（2026-09-14）
 
@@ -408,3 +434,4 @@ F7b / F8 / F9）；剩下 5 条（F1 / F4 / F5 / F10 / F11）于同日处置完�
 | H2 | **抢前台会把最大化的窗口还原**：写命令前置里无条件调 `ShowWindow(SW_RESTORE)`，而 `SW_RESTORE` 对**最大化**的窗口同样做「还原到原始大小与位置」 | 最大化记事本 `-9,-9,3458,1398` → 一条 `key f13 --hwnd` → `260,160,1020,560` | ✅ **本轮修**（DEC-085）：只在 `IsIconic` 时还原。守卫：`tests/unit/test_windows_foreground.py`（16 条：4 改期望 + 4 新增，红相 8 failed / 8 passed）。**真机复验**（源码版）：最大化 → `key --hwnd` 矩形不变且 `fg=1`；最小化 → 前置校验先报 `window_minimized`，即那次 `SW_RESTORE` 对写路径**不可达**，只是这一层自己的防御 |
 | H3 | **`lock unlock` 的人读文案恒为「锁空闲」**：刚踢掉一个活着的持有者也这么印 —— 人读分支只认 `lock status` 的 `holder` 字段，而 `lock.forceUnlock` 回的是 `released` / `previous_holder` | 同一次调用：`--json` 回 `{"released": true, "previous_holder": …}`，人读输出却是「锁空闲」，紧接着 `lock status` 确实空了 | ✅ **本轮修**：人读输出改报原持有者 |
 | H4 | 默认 `windows` **看不到应用的模态对话框**（`"另存为"` 这类有主窗口的附属窗被 GW_OWNER 规则滤掉）；`windows --all` 能列出来 | 让记事本 `ctrl+s` 弹出「另存为」：默认列表里没有它，`windows --all` 里有（`hwnd=0x00160CDE … "另存为"`） | ⬜ **记为口径、不算缺陷**：`windows` 是「应用窗口」清单（过滤规则写在 `windows.py::_is_top_level` 的 docstring 里），要看对话框用 `--all`。注意附属对话框会**占着前台**，此时发按键以焦点为准 |
+| H5 | **`click` / `move` 的「移动」可能是静默空操作**：`move_cursor` 拿模块级缓存 `_last_tracked`（「上次落点」）当轨迹起点，**从不读真实光标**。人一动鼠标缓存就过期，目标恰好等于缓存值时直接短路返回 0 —— 而 `SendInput` 的按钮事件**不带坐标**，落在光标实际所在处 | E12 主路径实测：`click 2205 1110` 报 `ok`、`moved_ms=0`，物理光标仍在终端 (2392,1218)，输入框没被点中，随后几次 `key enter` 全落到编辑器上，消息一直没发出去。缓存未命中时落点反而**精确**（`move 2000 400`）—— 复现条件是「目标恰好等于缓存」 | ✅ **本轮修**（DEC-086）：起点改成每次现读 `GetCursorPos`（`cursor_now()`），删掉模块级缓存；`click` / `move` 的结果里带回 `cursor`。守卫：`tests/unit/test_input_cursor_position.py` + `tests/unit/test_screenshot_cursor_readout.py`（红相 14 failed）。**真机复验**（本轮源码版 daemon）：`move 1000 500` → `moved_ms=717`、宿主读回 (800,400)×1.25 = (1000,500) 一致；已在目标点上 → `moved_ms=0`；`click 1500 700` → `moved_ms=764`、落点一致；随后 E12 一次成功 |

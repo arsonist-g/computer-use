@@ -101,16 +101,16 @@ computer-use <命令> [必需参数] [flag]
 | 命令 | 说明 | 参数 | 注意事项 |
 |---|---|---|---|
 | `windows` | 列出顶层窗口，从前到后 | `--all` | `--all`：连不可见或无标题的窗口一起列。`--verbose` 追加 `class`、`is_topmost`、`zorder`。字段：`hwnd`、`title`、`pid`、`process`、`rect`（`x,y,w,h`）、`monitor`、`is_foreground`、`is_minimized`、`elevated`。 |
-| `screenshot` | 截取一个窗口或一个显示器 | `--hwnd \| --full` `--monitor` `--format` | `--monitor` 是 0 基、默认主显示器，且必须配 `--full`；`--format` 取 `png` 或 `webp`。返回图片路径、尺寸、`origin`，以及服务这次请求的截图 `layer`。 |
+| `screenshot` | 截取一个窗口或一个显示器 | `--hwnd \| --full` `--monitor` `--format` `--cursor` | `--monitor` 是 0 基、默认主显示器，且必须配 `--full`；`--format` 取 `png` 或 `webp`。返回图片路径、尺寸、`origin`、服务这次请求的截图 `layer`，以及光标所在的屏幕坐标；`cursor_inside` 说明这个坐标落不落在这张图里。`--cursor` 另外在图上的光标处画一个鼠标大小的红框，并回报 `cursor_marker`（`drawn` / `outside` / `unsupported`）；光标不在图里时**不画**。 |
 | `parse` | 检测一张图里的元素，把 markdown 写在图旁边 | `--hwnd \| --image` `--ai` | 那份 markdown 里是一张表，每个元素有 `type`、`bbox`、`interactivity`、`content`。返回路径与数量；检测器没装时是 `omni_not_installed`。 |
 
 ### 写命令
 
-写操作返回耗时（`moved_ms`、`total_ms`），并可能带一个 `warning`：看到它就先重新确认目标再继续。写命令接受哪些共享参数，见上面那张表。
+写操作返回耗时（`moved_ms`、`total_ms`），并可能带一个 `warning`：看到它就先重新确认目标再继续。`click` 与 `move` 还会返回移动之后光标所在的屏幕坐标。写命令接受哪些共享参数，见上面那张表。
 
 | 命令 | 说明 | 参数 | 注意事项 |
 |---|---|---|---|
-| `click` | 在某个点点击 | `x* y*` `--button` `--count` `--hwnd` | `--button` 取 `left`（默认）、`right` 或 `middle`；`--count 2` 是双击。 |
+| `click` | 在某个点点击 | `x* y*` `--button` `--count` `--hwnd` | `--button` 取 `left`（默认）、`right` 或 `middle`；`--count 2` 是双击。点之前先把光标移过去：按钮事件不带坐标，落在光标**实际**所在处。 |
 | `move` | 移动光标 | `x* y*` `--hwnd` | 只悬停、不点击。这里 `--hwnd` 不改变前台。 |
 | `drag` | 在一点按下、移动、在另一点抬起 | `x1* y1* x2* y2*` `--button` `--hwnd` | `--button` 同 `click`。 |
 | `scroll` | 滚动 | `dx* dy*` `--at` | 正 `dy` 向上滚。`--at` 是在哪个点上滚，默认当前光标位置。 |

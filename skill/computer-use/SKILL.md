@@ -33,7 +33,7 @@ computer-use begin --agent-hint claude-code
 session s-20260913-183849-cgyg
 ```
 
-Pass that id with `--session`, or export `COMPUTER_USE_SESSION` once and drop the flag. `--agent-hint` is free text kept in the session metadata, so `session list` stays readable a week later.
+Pass that id with `--session`, or export `COMPUTER_USE_SESSION` once and drop the flag. `--agent-hint` is free text kept in the session metadata.
 
 `session end` releases the write lock and runs storage cleanup, so run it when the task is done. `session list` marks each session `active`, `ended`, or `orphaned` (the daemon restarted and no longer tracks it). An orphan's files stay on disk: start a fresh session rather than building on it. All sessions contend for a single global write lock, so a loser waits `lock_wait_seconds` (10 by default) and then fails with `lock_timeout`.
 
@@ -49,7 +49,7 @@ computer-use click 850 420 --hwnd 0x1A2B --session s-... --describe "open the fo
 computer-use session end --session s-...
 ```
 
-Look, act, look again: screenshot the target, decide the image coordinates of the thing you want to hit, add the origin, send one write, then screenshot again rather than assuming what the write opened. A first sanity run is `computer-use windows`: if it lists windows, the desktop layer works. When the coordinate arithmetic is new to you, validate it on a harmless point before a long run.
+Look, act, look again: screenshot the target, decide the image coordinates of the thing you want to hit, add the origin, send one write, then screenshot again rather than assuming what the write opened. A first sanity run is `computer-use windows`: if it lists windows, the desktop layer works.
 
 ## Command usage
 
@@ -57,7 +57,7 @@ Look, act, look again: screenshot the target, decide the image coordinates of th
 computer-use <command> [required arguments] [flags]
 ```
 
-- Required arguments are positional: `key ctrl+s` passes the combination with no flag name. A flag starts with `--` and either takes a value (`--session s-...`) or stands alone (`--json`). A write that names a window, a position, and a reason reads like `computer-use key ctrl+s --hwnd 0x1A2B --session s-... --describe "save the file"`.
+- Required arguments are positional: `key ctrl+s` passes the combination with no flag name. A flag starts with `--` and either takes a value (`--session s-...`) or stands alone (`--json`).
 - Flags may be written before or after the command, nested commands included.
 - **Do not guess a flag.** `computer-use --help` lists the commands, and `computer-use <command> --help` prints that command's arguments and the values each one accepts.
 
@@ -104,16 +104,16 @@ A row lists the parameters that belong to that command, and the shared ones are 
 | Command | Description | Parameters | Notes |
 |---|---|---|---|
 | `windows` | Lists top-level windows, front to back | `--all` | `--all`: include invisible and untitled windows. `--verbose` adds `class`, `is_topmost`, `zorder`. Fields: `hwnd`, `title`, `pid`, `process`, `rect` (`x,y,w,h`), `monitor`, `is_foreground`, `is_minimized`, `elevated`. |
-| `screenshot` | Captures a window or a display | `--hwnd \| --full` `--monitor` `--format` | `--monitor` is 0-based, defaults to the primary display, and needs `--full`; `--format` is `png` or `webp`. Returns the image path, its dimensions, its `origin`, and the capture `layer`. |
+| `screenshot` | Captures a window or a display | `--hwnd \| --full` `--monitor` `--format` `--cursor` | `--monitor` is 0-based, defaults to the primary display, and needs `--full`; `--format` is `png` or `webp`. Returns the image path, its dimensions, its `origin`, the capture `layer`, and the cursor's screen position (`cursor_inside` says whether it falls in the image). `--cursor` additionally paints a cursor-sized box over it and reports `cursor_marker`; a cursor outside the image is never painted. |
 | `parse` | Detects elements in an image and writes markdown beside it | `--hwnd \| --image` `--ai` | The markdown holds `type`, `bbox`, `interactivity`, and `content` per element. Returns the path and a count; without the detector, `omni_not_installed`. |
 
 ### Writes
 
-A write returns timing (`moved_ms`, `total_ms`) and may carry a `warning`: re-check the target when you see one. Which shared arguments the writes take is in the table above.
+A write returns timing (`moved_ms`, `total_ms`) and may carry a `warning`: re-check the target when you see one. `click` and `move` also return the cursor's screen position after the move. Which shared arguments the writes take is in the table above.
 
 | Command | Description | Parameters | Notes |
 |---|---|---|---|
-| `click` | Clicks at a point | `x* y*` `--button` `--count` `--hwnd` | `--button` is `left` (default), `right`, or `middle`; `--count 2` is a double-click. |
+| `click` | Clicks at a point | `x* y*` `--button` `--count` `--hwnd` | `--button` is `left` (default), `right`, or `middle`; `--count 2` is a double-click. Moves the cursor there first: a button event carries no coordinates, so it lands wherever the cursor already is. |
 | `move` | Moves the cursor | `x* y*` `--hwnd` | Hover only, no click. `--hwnd` does not change the foreground here. |
 | `drag` | Presses at one point, moves, and releases at another | `x1* y1* x2* y2*` `--button` `--hwnd` | `--button` as for `click`. |
 | `scroll` | Scrolls | `dx* dy*` `--at` | Positive `dy` scrolls up. `--at` is the point to scroll at, defaulting to the current cursor position. |
@@ -137,7 +137,7 @@ A write returns timing (`moved_ms`, `total_ms`) and may carry a `warning`: re-ch
 
 ## Screen coordinates
 
-Coordinates are physical pixels, origin at the top left of the primary display, y increasing downward, and the tool is per-monitor DPI aware before it reads any coordinate. Never apply a scale factor yourself.
+Coordinates are physical pixels, origin at the top left of the primary display, y increasing downward, and the tool is per-monitor DPI aware. Never apply a scale factor yourself.
 
 A screenshot's `origin` is the screen position of the image's pixel `(0, 0)`: the window's top-left corner for a window screenshot, `(0, 0)` for a full-screen one. To hit what you saw in an image:
 
@@ -146,7 +146,7 @@ screen_x = origin_x + image_x
 screen_y = origin_y + image_y
 ```
 
-The rule is: never pass an image coordinate to a write command without adding the origin first. The window origin comes from the compositor's extended frame, so there is no offset for you to compensate for.
+The window origin comes from the compositor's extended frame, so there is no offset for you to compensate for.
 
 ## Sending input
 
