@@ -358,6 +358,11 @@ def bring_to_foreground(hwnd: int) -> None:
     不确认的话，点击会落到当时真正的前台窗口上 —— Windows 的输入是发给前台窗口的，
     不是发给「你心里想的那个窗口」的。这正是 DEC-013 记录的第 1 个失效模式。
 
+    目标**最小化**时先还原它一次（`SW_RESTORE`）—— 最小化的窗口拿不到前台、也拿不到焦点。
+    已经可见的窗口（普通 / 最大化）**一个 `ShowWindow` 都不发**：`SW_RESTORE` 的语义是
+    「最小化**或最大化**的窗口都还原到原始大小与位置」，无条件调用等于每条写命令都替用户
+    改一次窗口布局（DEC-085）。
+
     **前台不在我们手里时一次抢不到**：改前台的权利属于「最近一次收到真实输入的进程」，
     其余的进程会被系统拒绝（本机 `ForegroundLockTimeout` 实测 200000ms）。所以这里
     三级加码、每级都验证（DEC-081）：
@@ -378,7 +383,8 @@ def bring_to_foreground(hwnd: int) -> None:
     if w.foreground_hwnd() == hwnd:
         _give_focus(hwnd)
         return
-    w.user32.ShowWindow(hwnd, w.SW_RESTORE)
+    if w.user32.IsIconic(hwnd):
+        w.user32.ShowWindow(hwnd, w.SW_RESTORE)
     if w.user32.SetForegroundWindow(hwnd) and w.foreground_hwnd() == hwnd:
         _give_focus(hwnd)
         return

@@ -4,6 +4,10 @@
 `bring_to_foreground` / `_attach_to_the_foreground_thread` / `_detach_from` / `_send_alt`
 的 docstring（DEC-013 第 2 层、DEC-081、DEC-030）。
 
+「抢前台前先还原」这一步的权威是 DEC-085：`IsIconic(目标窗口)` 判定为最小化时才发
+一次 `ShowWindow(hwnd, SW_RESTORE)`；非最小化（普通窗口**或最大化窗口**）一个
+`ShowWindow` 都不发，直接进三级抢占梯子 —— 提到前台不是重排用户的窗口布局。
+
 **本文件一次都不碰真实桌面**：每个用例都把 `cu.desktop.windows` 的模块级名字 `w` 换成
 `_FakeDesktop`，`w.user32` / `w.kernel32` / `w.foreground_hwnd()` / `w.INPUT` 全部由替身应答。
 真实的 `SetForegroundWindow` / `AttachThreadInput` / `SendInput` / `ShowWindow` 会抢走用户
@@ -11,8 +15,9 @@
 
 覆盖判据：`bring_to_foreground` 与 `_attach_to_the_foreground_thread` 的**分支（decision）
 全覆盖** —— 三级重试梯子的每条转移各一条用例（state transition testing 的 0-switch），
-外加 `_attach_to_the_foreground_thread` 三个提前返回的分支各一条。项目未配置覆盖率工具
-（无 pytest-cov / coverage），所以这是声明值而非实测值。
+外加 `_attach_to_the_foreground_thread` 三个提前返回的分支各一条，以及 DEC-085 的
+`IsIconic` 判定两支各一条（非最小化 → 一个 `ShowWindow` 都不发；最小化 → 恰好还原一次）。
+项目未配置覆盖率工具（无 pytest-cov / coverage），所以这是声明值而非实测值。
 
 oracle 类别逐条标注：specified（契约原文或 Win32 外部规范）/ derived（由契约推出）。
 """
@@ -33,6 +38,8 @@ from cu.errors import CUError, ErrorCode
 # ---------------------------------------------------------------------------
 
 WIN_SW_RESTORE = 9            # ShowWindow 的还原命令
+WIN_NOT_MINIMIZED = 0         # IsIconic：0 = 不在最小化（普通窗口或最大化窗口）
+WIN_MINIMIZED = 1             # IsIconic：非 0 = 已最小化
 WIN_VK_MENU = 0x12            # ALT 的虚拟键码
 WIN_INPUT_KEYBOARD = 1        # INPUT.type：键盘事件
 WIN_KEYEVENTF_KEYUP = 0x0002  # KEYBDINPUT.dwFlags 的「抬起」位
@@ -64,6 +71,9 @@ class _FakeUser32:
     def ShowWindow(self, hwnd: int, command: int) -> bool:
         self._desktop.events.append(("ShowWindow", hwnd, command))
         return True
+
+    def IsIconic(self, hwnd: int) -> int:
+        return self._desktop.is_iconic(hwnd)
 
     def SetForegroundWindow(self, hwnd: int) -> bool:
         return self._desktop.set_foreground_window(hwnd)
@@ -102,6 +112,8 @@ class _FakeDesktop:
     `script` 是 `SetForegroundWindow` 逐次调用的剧本（见 `_step`）。其余成员按契约取值：
     `foreground_hwnd()` 报当前前台，`kernel32.GetCurrentThreadId()` 报本线程，
     `user32.GetWindowThreadProcessId(前台窗口)` 报前台窗口所属线程。
+    `user32.IsIconic(窗口)` 报 `minimized` 给的值 —— DEC-085 的布局判据就是它，所以在
+    `user32.IsIconic` 与模块级 `w.IsIconic` 两条访问路径上都声明（契约没规定走哪条）。
 
     常量与结构体：`_send_alt` 会做 `ctypes.sizeof(w.INPUT)` 与 `ctypes.byref(item)`，所以
     替身必须给真实的 ctypes 类型。这里借的是 `win32` 那份**纯类型声明**（不含任何调用，
@@ -124,6 +136,7 @@ class _FakeDesktop:
         foreground_thread: int = FOREGROUND_THREAD,
         target_thread: int = TARGET_THREAD,
         attach_ok: bool = True,
+        minimized: bool = False,
     ) -> None:
         self.script = [_step(item) for item in script]
         self.foreground = foreground
@@ -131,6 +144,8 @@ class _FakeDesktop:
         self.foreground_thread = foreground_thread
         self.target_thread = target_thread
         self.attach_ok = attach_ok
+        #: `IsIconic` 的判定值：False = 非最小化（普通与最大化在 IsIconic 上同值）。
+        self.minimized = minimized
         #: `SetFocus` 拿到焦点的那个窗口（None = 从没设过）。
         self.focused: int | None = None
         #: 动作序列 —— 只记真的发生的事：ShowWindow / SetForegroundWindow /
@@ -143,11 +158,22 @@ class _FakeDesktop:
         self.injected: list[tuple[int, int]] = []
         #: 被问过「属于哪个线程」的窗口。
         self.thread_queries: list[int] = []
+        #: 被问过「是否最小化」的窗口（`IsIconic`），按调用顺序。
+        self.iconic_queries: list[int] = []
         self.user32 = _FakeUser32(self)
         self.kernel32 = _FakeKernel32(self)
 
     def foreground_hwnd(self) -> int:
         return self.foreground
+
+    def is_iconic(self, hwnd: int) -> int:
+        """`IsIconic(hwnd)` 的判定值（Win32：非 0 = 已最小化）。"""
+        self.iconic_queries.append(hwnd)
+        return WIN_MINIMIZED if self.minimized else WIN_NOT_MINIMIZED
+
+    def IsIconic(self, hwnd: int) -> int:
+        """模块级 `w.IsIconic` 那条访问路径 —— 与 `w.user32.IsIconic` 同一份判定与记录。"""
+        return self.is_iconic(hwnd)
 
     def set_foreground_window(self, hwnd: int) -> bool:
         index = self.set_foreground_calls
@@ -179,10 +205,22 @@ def _install(monkeypatch: pytest.MonkeyPatch, desktop: _FakeDesktop) -> _FakeDes
     return desktop
 
 
+def _restore_events(target: int) -> list[tuple[object, ...]]:
+    """最小化窗口在被抢前台之前那**唯一**一次还原（DEC-085）。
+
+    命令字面量 9 取自 Win32 文档的 `SW_RESTORE`：它把最小化**或最大化**的窗口都还原到
+    原始大小与位置 —— 所以对一个最大化窗口发它，就是把用户的窗口布局改掉。
+    """
+    return [("ShowWindow", target, WIN_SW_RESTORE)]
+
+
 def _ladder_events(target: int) -> list[tuple[object, ...]]:
-    """第 1 级失败之后走满第 2、3 级并解挂的完整动作序列（契约第 3 / 4 / 5 条）。"""
+    """第 1 级失败之后走满第 2、3 级并解挂的完整动作序列（契约第 3 / 4 / 5 条）。
+
+    这里没有 `ShowWindow`：DEC-085 之后，非最小化窗口在三级梯子之前一个 `ShowWindow`
+    都不发；最小化窗口那一次还原由 `_restore_events` 单独摆出。
+    """
     return [
-        ("ShowWindow", target, WIN_SW_RESTORE),
         ("SetForegroundWindow", target),
         ("AttachThreadInput", FOREGROUND_THREAD, MY_THREAD, True),
         ("SetForegroundWindow", target),
@@ -203,6 +241,11 @@ def _focus_events(target: int) -> list[tuple[object, ...]]:
         ("SetFocus", target),
         ("AttachThreadInput", TARGET_THREAD, MY_THREAD, False),
     ]
+
+
+def _showwindow_events(desktop: _FakeDesktop) -> list[tuple[object, ...]]:
+    """替身记下的全部 `ShowWindow` 调用 —— DEC-085 的布局判据看的就是它。"""
+    return [event for event in desktop.events if event[0] == "ShowWindow"]
 
 
 def test_an_already_foreground_window_is_not_re_foregrounded_but_gets_the_focus(
@@ -227,8 +270,10 @@ def test_an_already_foreground_window_is_not_re_foregrounded_but_gets_the_focus(
 def test_the_first_level_succeeds_without_attaching_or_injecting_alt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """oracle: specified —— 契约第 2 条：`ShowWindow(hwnd, SW_RESTORE)` → 第 1 级
-    `SetForegroundWindow`；命令字面量 9 取自 Win32 文档的 `SW_RESTORE`。
+    """oracle: specified —— 契约第 2 条：第 1 级 `SetForegroundWindow` 报成功 **且** 前台
+    确实到了目标，就此收工。
+    specified —— DEC-085：替身默认 `minimized=False`，于是抢占之前一个 `ShowWindow`
+    都没有，这一趟不带任何布局副作用。
     derived —— 第 1 级已成，就不该再挂输入队列，也不该注入 ALT。
     """
     desktop = _install(monkeypatch, _FakeDesktop(script=[True]))
@@ -236,9 +281,9 @@ def test_the_first_level_succeeds_without_attaching_or_injecting_alt(
     windows_mod.bring_to_foreground(TARGET_HWND)
 
     assert desktop.events == [
-        ("ShowWindow", TARGET_HWND, WIN_SW_RESTORE),
         ("SetForegroundWindow", TARGET_HWND),
     ] + _focus_events(TARGET_HWND)
+    assert _showwindow_events(desktop) == [], "非最小化窗口不该被动过布局"
     assert desktop.set_foreground_calls == 1
     # 第 1 级就抢到了：这次挂输入队列**只为**把焦点交过去，不是为了抢前台。
     assert desktop.attach_thread_input_calls == [
@@ -254,6 +299,8 @@ def test_the_second_level_attaches_before_the_retry_and_detaches_after_it(
 ) -> None:
     """oracle: specified —— 契约第 3 / 5 条：第 2 级先 `AttachThreadInput` 挂到当前前台线程、
     再 `SetForegroundWindow`；`_detach_from(attached)` 在 `finally` 里（挂上就必须解挂）。
+    specified —— DEC-085：非最小化窗口（替身默认）不发 `ShowWindow`，第 2 级直接跟在
+    第 1 级的 `SetForegroundWindow` 之后。
     derived —— attach 在前、detach 在后，且解挂是这条路径的最后一个动作。
     """
     desktop = _install(monkeypatch, _FakeDesktop(script=[False, True]))
@@ -261,7 +308,6 @@ def test_the_second_level_attaches_before_the_retry_and_detaches_after_it(
     windows_mod.bring_to_foreground(TARGET_HWND)
 
     assert desktop.events == [
-        ("ShowWindow", TARGET_HWND, WIN_SW_RESTORE),
         ("SetForegroundWindow", TARGET_HWND),
         ("AttachThreadInput", FOREGROUND_THREAD, MY_THREAD, True),
         ("SetForegroundWindow", TARGET_HWND),
@@ -428,3 +474,85 @@ def test_the_first_level_needs_the_call_to_succeed_as_well(monkeypatch: pytest.M
         (TARGET_THREAD, MY_THREAD, True),
         (TARGET_THREAD, MY_THREAD, False),
     ]
+
+
+# ---------------------------------------------------------------------------
+# DEC-085：抢前台不改窗口布局 —— 只有最小化的窗口才还原
+#
+# 外部规范（Win32）：`IsIconic` 判定窗口是否最小化；`SW_RESTORE`(9) 把最小化**或最大化**
+# 的窗口都还原到原始大小与位置。所以「抢前台前先无条件还原一下」的代价是：对最大化窗口
+# 发一条 `key --hwnd`，它的矩形就被改回上一次的普通尺寸 —— 提到前台不该重排用户的布局。
+# 下面四条钉住的判据是 `IsIconic`，不是「反正先还原一下总没错」。
+# ---------------------------------------------------------------------------
+
+
+def test_a_normal_window_gets_no_showwindow_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """oracle: specified —— DEC-085：目标未最小化（`IsIconic` 返回 0）→ 抢前台过程中
+    **一个 `ShowWindow` 调用都没有**，直接进三级抢占梯子。
+    derived —— 三级梯子与焦点交接原样保留（既有契约不变），整串动作只少了还原那一步。
+    """
+    desktop = _install(monkeypatch, _FakeDesktop(minimized=False, script=[False, False, True]))
+
+    windows_mod.bring_to_foreground(TARGET_HWND)
+
+    assert desktop.events == _ladder_events(TARGET_HWND) + _focus_events(TARGET_HWND)
+    assert _showwindow_events(desktop) == [], "非最小化窗口不该被动过布局"
+    assert TARGET_HWND in desktop.iconic_queries, "判据是 IsIconic(目标窗口)"
+
+
+def test_a_maximized_window_gets_no_showwindow_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """oracle: specified —— DEC-085：非最小化的两个状态（普通、最大化）在 `IsIconic` 上同值
+    （都返回 0），最大化窗口因此同样**一个 `ShowWindow` 都不发** —— 发一次 `SW_RESTORE`
+    正是把最大化窗口改回它上一次普通尺寸的那条路。
+    derived —— 实现只问 `IsIconic`：替身没有 `IsZoomed`，任何「再按 IsZoomed 还原成最大化」
+    的分支都会在这里以 AttributeError 炸掉（DEC-085 明确不做这个分支）。
+    """
+    desktop = _install(monkeypatch, _FakeDesktop(minimized=False, script=[True]))
+
+    windows_mod.bring_to_foreground(TARGET_HWND)
+
+    assert desktop.events == [
+        ("SetForegroundWindow", TARGET_HWND),
+    ] + _focus_events(TARGET_HWND)
+    assert _showwindow_events(desktop) == [], "最大化窗口的矩形要保持最大化"
+    assert TARGET_HWND in desktop.iconic_queries
+
+
+def test_a_minimized_window_is_restored_once_before_the_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """oracle: specified —— DEC-085：目标已最小化（`IsIconic` 返回非 0）→ 抢前台之前
+    **恰好一次** `ShowWindow(hwnd, SW_RESTORE)`；命令字面量 9 取自 Win32 文档的
+    `SW_RESTORE`。
+    derived —— 还原落在第 1 级 `SetForegroundWindow` 之前，其后照旧走梯子与焦点交接。
+    """
+    desktop = _install(monkeypatch, _FakeDesktop(minimized=True, script=[True]))
+
+    windows_mod.bring_to_foreground(TARGET_HWND)
+
+    assert desktop.events == _restore_events(TARGET_HWND) + [
+        ("SetForegroundWindow", TARGET_HWND),
+    ] + _focus_events(TARGET_HWND)
+    assert _showwindow_events(desktop) == _restore_events(TARGET_HWND), "最小化窗口恰好还原一次"
+    assert TARGET_HWND in desktop.iconic_queries
+
+
+def test_a_minimized_window_is_restored_once_across_the_whole_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """oracle: specified —— DEC-085：最小化窗口的这次还原必须留着 —— 最小化的窗口拿不到
+    前台也拿不到焦点，这是这一步唯一存在的理由。
+    derived —— 三级梯子全程**只有**这一次 `ShowWindow`，且它是整串动作的第一步。
+    specified —— 判定仍然是 `IsIconic(目标窗口)`：这条路径的动作序列与「无脑还原」恰好
+    相同，能把它与后者分开的正是这个判定。
+    """
+    desktop = _install(monkeypatch, _FakeDesktop(minimized=True, script=[False, False, True]))
+
+    windows_mod.bring_to_foreground(TARGET_HWND)
+
+    assert desktop.events == (
+        _restore_events(TARGET_HWND) + _ladder_events(TARGET_HWND) + _focus_events(TARGET_HWND)
+    )
+    assert _showwindow_events(desktop) == _restore_events(TARGET_HWND), "整条路径上只还原这一次"
+    assert desktop.events[0] == _restore_events(TARGET_HWND)[0], "还原在抢占之前"
+    assert TARGET_HWND in desktop.iconic_queries, "还原由 IsIconic 判定，不是无脑还原"
