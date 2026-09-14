@@ -408,6 +408,13 @@ def render_text(command: str, result: Any, verbose: bool = False) -> str:
                     f"files={result['deleted_files']}  "
                     f"sessions={len(result.get('deleted_sessions', []))}")
     if command == "lock":
+        # `lock unlock --force` 的返回是 `{released, previous_holder}`，与 `lock status`
+        # 的 `holder` 没有共同的键：只按 `holder` 判定会把「刚夺掉一个活着的持有者」
+        # 与「锁本就空闲」印成同一句「锁空闲」—— 读的人于是以为什么都没发生。
+        if "released" in result:
+            if result.get("released"):
+                return f"已强夺写锁  原持有者 {result.get('previous_holder')}"
+            return "锁本就空闲  没有人被强夺"
         holder = result.get("holder")
         if not holder:
             return "锁空闲" + ("（有等待者）" if result.get("waiting") else "")
