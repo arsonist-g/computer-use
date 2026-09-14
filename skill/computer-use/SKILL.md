@@ -69,7 +69,7 @@ Every command accepts every argument below. The `Where` column says where each o
 |---|---|---|
 | `--session <id>` | required by `screenshot`, `parse`, `session end`, and all six writes | Session id, also read from `COMPUTER_USE_SESSION`. |
 | `--describe "<text>"` | required by all six writes | What this operation does and why. |
-| `--hwnd <h>` | `screenshot`, `parse`, and every write except `scroll` | Target window: checked against your session's most recent screenshot of it (`window_stale` if the system recycled the handle), and brought to the foreground for `click`, `drag`, and `type`. |
+| `--hwnd <h>` | `screenshot`, `parse`, and every write except `scroll` | Target window: checked against your session's most recent screenshot of it (`window_stale` if the system recycled the handle), and brought to the foreground for `click`, `drag`, `type`, and `key`. |
 | `--json` | everywhere | Machine-readable output on stdout. |
 | `--inline` | `screenshot`, `parse` | Return the image or data as base64 instead of a path. |
 | `--verbose` | everywhere | Lower-level detail, such as which capture layer served the request. |
@@ -117,8 +117,8 @@ A write returns timing (`moved_ms`, `total_ms`) and may carry a `warning`: re-ch
 | `move` | Moves the cursor | `x* y*` `--hwnd` | Hover only, no click. `--hwnd` does not change the foreground here. |
 | `drag` | Presses at one point, moves, and releases at another | `x1* y1* x2* y2*` `--button` `--hwnd` | `--button` as for `click`. |
 | `scroll` | Scrolls | `dx* dy*` `--at` | Positive `dy` scrolls up. `--at` is the point to scroll at, defaulting to the current cursor position. |
-| `type` | Types text at the cursor | `text*` `--hwnd` | Unicode input path, so Chinese needs no clipboard. A newline is sent as Enter. If it falls back to the clipboard the result says so (`fallback: clipboard`, `clipboard_restored`), the restore can fail, and the whole string can be sent twice: verify the field. |
-| `key` | Sends a key combination | `combo*` `--hwnd` `--force` | A blocked combination fails with `dangerous_key_blocked`. `--force` bypasses the blocklist (`win+l`, `ctrl+alt+del`, and anything in `danger_keys`). |
+| `type` | Types text at the cursor | `text*` `--hwnd` | Plain text uses the Unicode input path, so Chinese needs no clipboard. A newline in the text (`\n`, `\r\n`, or a lone `\r`) goes through the clipboard and lands as a literal line break, never as an Enter keypress; press Enter with `key enter`. Clipboard use is reported (`via: clipboard` or `fallback: clipboard`, plus `clipboard_restored`); the restore can fail and a fallback repeats a prefix, so verify the field. |
+| `key` | Sends one key or a combination | `combo*` `--hwnd` `--force` | Single keys and combinations share one syntax: `enter`, `win`, `esc`, `f13`, `ctrl+s`, `alt+tab`. A blocked combination fails with `dangerous_key_blocked`. `--force` bypasses the blocklist (`win+l`, `ctrl+alt+del`, and anything in `danger_keys`). |
 
 ### The write lock
 

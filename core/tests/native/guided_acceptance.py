@@ -343,23 +343,22 @@ def section4() -> None:
                    else "光晕不可见或系统光标异常")
 
         def check_4_4() -> None:
-            say("\n  【4.4】逐个显示三个状态，每态 8 秒。对照 overlay.md §2.1（含 Delta）：")
+            say("\n  【4.4】逐个显示两个状态，每态 8 秒。对照 overlay.md §2.1（含 Delta）：")
             say("        active   -> 流动光谱 / 胶囊: AI is using your computer · [Esc] to cancel")
             say("                    / 琥珀目标框 / 光标光晕")
             say("        stopping -> **冻结成单一琥珀** / 胶囊: Stopping")
-            say("        error    -> **冻结成单一红色** / 胶囊: Something went wrong · [Esc] to dismiss")
             say("        注意：**没有独立的「武装期」样子** —— 前摇与 Active 完全同相")
             say("        （同文案、同色相、同流速），所以它不再是一个要画出来的状态。")
+            say("        也没有 error 态（DEC-080）：写操作失败不再占用覆盖层。")
             for state, note in (
                 (OverlayState.ACTIVE, "流动光谱 + 琥珀目标框 + 光标光晕"),
                 (OverlayState.STOPPING, "冻结单一琥珀（**不是**彩色的、只是不动的光谱）+ Stopping"),
-                (OverlayState.ERROR, "冻结单一红 + Something went wrong"),
             ):
                 say(f"        —— {state.value}：{note}")
                 show(state, 8.0, target=(900, 600, 400, 300), cursor=(1700, 700))
             overlay.transition(OverlayState.OFF)
             time.sleep(0.4)
-            answer = ask("三态的胶囊文案与光谱颜色都对吗？")
+            answer = ask("两态的胶囊文案与光谱颜色都对吗？")
             record("4.4", "通过" if answer.startswith("y") else "失败",
                    "三态文案与光谱符合 overlay.md §2.1 及其 Delta" if answer.startswith("y")
                    else "与规范不符")
@@ -424,8 +423,11 @@ def section4() -> None:
             show(OverlayState.ACTIVE, 8.0, target=(900, 600, 400, 300), cursor=(1700, 700))
             say("        —— Active → Stopping")
             show(OverlayState.STOPPING, 5.0)
-            say("        —— Stopping → Error")
-            show(OverlayState.ERROR, 5.0)
+            say("        —— Stopping → OFF（冻结态撤下）")
+            overlay.transition(OverlayState.OFF)
+            time.sleep(0.8)
+            say("        —— OFF → Active（再出现一次，看冻结态回到流动是否连续）")
+            show(OverlayState.ACTIVE, 5.0, target=(900, 600, 400, 300), cursor=(1700, 700))
             overlay.transition(OverlayState.OFF)
             time.sleep(0.3)
             answer = ask("切换的那一瞬间，光谱有没有顿一下、或者颜色跳回起点？")

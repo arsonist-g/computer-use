@@ -50,7 +50,7 @@ Set `COMPUTER_USE_SKILL_DIR` to install somewhere else. `computer-use --launcher
 | `storage_limit_bytes` | 1 GiB | Total size cap for `sessions/`, enforced at `session end`, oldest first. |
 | `image_format` | `png` | Default screenshot format; `--format` overrides it per call. |
 | `lock_wait_seconds` | 10 | How long a write waits for the write lock before `lock_timeout`. |
-| `overlay_arm_ms` | 500 | Delay before a write sequence starts, giving the person time to take their hands off the keyboard. Input is already blocked during it. |
+| `overlay_arm_ms` | 1500 | Delay before a write sequence starts, giving the person time to take their hands off the keyboard. Input is already blocked during it. |
 | `overlay_continue_seconds` | 30 | How long `--continue` keeps the overlay and input blocking while it waits for your next command. A write with no flag ends the sequence when it finishes. |
 | `overlay_exit_hold_ms` | 500 | Input stays blocked this long after the overlay leaves, so a physical keystroke in that instant is not swallowed. |
 | `daemon_idle_exit_seconds` | 600 | The daemon exits after this much idle time. It never exits while the overlay or the write lock is present. |

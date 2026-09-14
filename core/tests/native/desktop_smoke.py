@@ -545,10 +545,7 @@ def t10_frozen_states_are_single_hue() -> None:
     overlay = ControlOverlay()
     screen = _read_screen()
     overlay._screen = screen
-    frozen = {
-        state.value: hue_bins(state)
-        for state in (OverlayState.STOPPING, OverlayState.ERROR)
-    }
+    frozen = {OverlayState.STOPPING.value: hue_bins(OverlayState.STOPPING)}
     flowing = {
         state.value: hue_bins(state)
         for state in (OverlayState.ACTIVE,)

@@ -66,7 +66,7 @@ computer-use <命令> [必需参数] [flag]
 |---|---|---|
 | `--session <id>` | `screenshot`、`parse`、`session end` 与六条写命令必需 | 会话 id，也会从 `COMPUTER_USE_SESSION` 读取。 |
 | `--describe "<text>"` | 六条写命令必需 | 这次操作做什么、为什么。 |
-| `--hwnd <h>` | `screenshot`、`parse`，以及除 `scroll` 外的每条写命令 | 目标窗口：发送前会拿这个句柄与你这个会话里**最近一次对该窗口的截图**作比对（系统把句柄复用出去时是 `window_stale`），并且对 `click`、`drag`、`type` 先把窗口提到前台。 |
+| `--hwnd <h>` | `screenshot`、`parse`，以及除 `scroll` 外的每条写命令 | 目标窗口：发送前会拿这个句柄与你这个会话里**最近一次对该窗口的截图**作比对（系统把句柄复用出去时是 `window_stale`），并且对 `click`、`drag`、`type`、`key` 先把窗口提到前台。 |
 | `--json` | 到处都能用 | 机器可读输出，走 stdout。 |
 | `--inline` | `screenshot`、`parse` | 图片或数据以 base64 返回，而不是只给路径。 |
 | `--verbose` | 到处都能用 | 追加低层细节，比如这次请求由哪一层截图降级服务。 |
@@ -114,8 +114,8 @@ computer-use <命令> [必需参数] [flag]
 | `move` | 移动光标 | `x* y*` `--hwnd` | 只悬停、不点击。这里 `--hwnd` 不改变前台。 |
 | `drag` | 在一点按下、移动、在另一点抬起 | `x1* y1* x2* y2*` `--button` `--hwnd` | `--button` 同 `click`。 |
 | `scroll` | 滚动 | `dx* dy*` `--at` | 正 `dy` 向上滚。`--at` 是在哪个点上滚，默认当前光标位置。 |
-| `type` | 在光标处输入文本 | `text*` `--hwnd` | 走 Unicode 输入路径，所以写中文不需要剪贴板。换行以 Enter 发送。降级走剪贴板时结果里会标出（`fallback: clipboard`、`clipboard_restored`），还原可能失败，而且整段字符串可能被发两遍：核对那个输入框。 |
-| `key` | 发送组合键 | `combo*` `--hwnd` `--force` | 被挡下的组合键以 `dangerous_key_blocked` 失败。`--force` 越过危险键黑名单（`win+l`、`ctrl+alt+del`，以及 `danger_keys` 里的任何组合）。 |
+| `type` | 在光标处输入文本 | `text*` `--hwnd` | 普通文本走 Unicode 输入路径，所以写中文不需要剪贴板。文本里的换行（`\n`、`\r\n` 或单独的 `\r`）改经剪贴板粘贴插入，落下的是字面量换行，绝不合成 Enter 按键；要按 Enter 用 `key enter`。走了剪贴板会在结果里标出（`via: clipboard` 或 `fallback: clipboard`，外加 `clipboard_restored`）：还原可能失败，而降级那一次可能把已经落下的前缀再发一遍，核对那个输入框。 |
+| `key` | 发送单键或组合键 | `combo*` `--hwnd` `--force` | 单键与组合键同一套写法：`enter`、`win`、`esc`、`f13`、`ctrl+s`、`alt+tab`。被挡下的组合键以 `dangerous_key_blocked` 失败。`--force` 越过危险键黑名单（`win+l`、`ctrl+alt+del`，以及 `danger_keys` 里的任何组合）。 |
 
 ### 写锁
 

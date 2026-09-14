@@ -1,6 +1,6 @@
 """验收清单 §6（输入行为）的自动化落地 —— 靶子是脚本自己起的记事本。
 
-对应 `core/tests/acceptance.md` §6 的 6.1 ~ 6.10。
+对应 `core/tests/acceptance.md` §6 的 6.1 ~ 6.14。
 
 这一节原本全是「目视」项，但它们其实都有**客观读数**：
 
@@ -13,6 +13,7 @@
 | 6.6 拖拽 | 拖右边框，量窗口矩形的前后差 |
 | 6.7 滚轮方向 | 编辑控件的 `EM_GETFIRSTVISIBLELINE` 前后差 |
 | 6.8/6.9/6.10 | 命令返回的错误码 |
+| 6.15 抢前台 | 发键前后的 `GetForegroundWindow`，加上靶子里的选区读回 |
 
 只有 6.2 的「自然」是审美判断，这里用两个可量化代理替代目视，并在结论里写明。
 
@@ -67,9 +68,15 @@ def cu_json(*args: str, timeout: float = 90.0) -> dict:
         return {}
 
 
-def do(*args: str, describe: str) -> tuple[int, str, str]:
-    """发一条写命令（自动带 session / describe / --end）。"""
-    return cu(*args, "--session", SESSION, "--describe", describe, "--end")
+def do(*args: str, describe: str, keep: bool = True) -> tuple[int, str, str]:
+    """发一条写命令（自动带 session / describe）。
+
+    **默认带 `--continue`**：一次验收里的连续操作应当跑在**同一条保持窗口**里 ——
+    每条都结束序列的话，每条都要重走一遍前摇，覆盖层刚武装就退场，看起来就像
+    「工具接管了屏幕」这件事根本没发生过。只有收尾那条才传 `keep=False`（`--end`）。
+    """
+    flag = "--continue" if keep else "--end"
+    return cu(*args, "--session", SESSION, "--describe", describe, flag)
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +187,14 @@ def _copy_selection(hwnd: int, note: str) -> str | None:
     time.sleep(0.4)
     got = W.clipboard_get()
     return None if got is not None and got.strip() == _SENTINEL else got
+
+
+def _show(text: str) -> str:
+    """把非 BMP 字符写成 `<U+XXXX>` 再 repr —— 控制台打不出 emoji 时结论仍可复核。"""
+    for ch in text:
+        if ord(ch) > 0xFFFF:
+            text = text.replace(ch, f"<U+{ord(ch):X}>")
+    return repr(text)
 
 
 def check_6_3(hwnd: int, edit: int) -> None:
@@ -326,6 +341,143 @@ def check_6_10(hwnd: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6.11 文本里的换行不合成 Enter（DEC-077）
+# ---------------------------------------------------------------------------
+
+
+def check_6_11(hwnd: int, edit: int) -> None:
+    """两半：真机看换行确实落进去，事件流看**一个 Enter 事件都没发**。
+
+    记事本里「换行」与「按 Enter」的结果一样（都是 CRLF），所以真机那一半证明不了
+    「没按 Enter」；后者只能看事件流 —— 把 `input._send` 换成记录器，走一次含换行的
+    `type_text`，断言记录里没有 VK_RETURN（0x0D）。
+    """
+    wanted = "AA\nBB\nCC"
+    _clear_editor(edit, hwnd)
+    answer = cu_json("type", wanted, "--hwnd", hex(hwnd), "--session", SESSION,
+                     "--describe", "验收 6.11：含换行的文本", "--end")
+    detail = answer.get("result") or {}
+
+    from cu.desktop import input as input_mod
+    from cu.desktop import win32 as w
+    from cu.desktop import windows as windows_mod
+
+    _clear_editor(edit, hwnd)   # 上面那条已经写进去一份，读回只留这一份
+    windows_mod.bring_to_foreground(hwnd)
+    time.sleep(0.3)
+    vks: list[int] = []
+    original = input_mod._send
+
+    def recorder(*inputs):
+        vks.extend(item.ki.wVk for item in inputs
+                   if item.type == w.INPUT_KEYBOARD
+                   and not item.ki.dwFlags & w.KEYEVENTF_UNICODE)
+        return original(*inputs)
+
+    input_mod._send = recorder
+    try:
+        input_mod.type_text(wanted)
+    finally:
+        input_mod._send = original
+    time.sleep(0.5)
+
+    got = (_select_all_and_copy(hwnd, "验收 6.11") or "").replace("\r\n", "\n")
+    via_ok = detail.get("via") == "clipboard" and detail.get("reason") == "newline"
+    record("6.11", "通过" if (via_ok and got == wanted and 0x0D not in vks) else "失败",
+           f"含换行的文本落下去是 {got!r}（期望 {wanted!r}）；取道 via={detail.get('via')!r} "
+           f"reason={detail.get('reason')!r}；事件流里的按键 VK={vks}"
+           f"（VK_RETURN=0x0D 出现 {vks.count(0x0D)} 次）")
+
+
+# ---------------------------------------------------------------------------
+# 6.12 单键 `key enter`（`key` 不只吃组合键）
+# ---------------------------------------------------------------------------
+
+
+def check_6_12(hwnd: int, edit: int) -> None:
+    """文本里一个换行都没有，两行只可能来自按键 —— 这条测的就是 `key` 的单键写法。"""
+    _clear_editor(edit, hwnd)
+    do("type", "AA", "--hwnd", hex(hwnd), describe="验收 6.12：先写一行")
+    code, _out, err = do("key", "enter", "--hwnd", hex(hwnd), describe="验收 6.12：单键 enter")
+    do("type", "BB", "--hwnd", hex(hwnd), describe="验收 6.12：再写一行")
+    time.sleep(0.5)
+    got = _select_all_and_copy(hwnd, "验收 6.12") or ""
+    record("6.12", "通过" if (code == 0 and got == "AA\r\nBB") else "失败",
+           f"`type AA` → `key enter` → `type BB` 读回 {got!r}（期望 AA、BB 两行）"
+           + ("" if code == 0 else f" · exit={code} {err.splitlines()[:1]}"))
+
+
+# ---------------------------------------------------------------------------
+# 6.14 非 BMP 字符（emoji）不被截断（DEC-078）
+# ---------------------------------------------------------------------------
+
+
+def check_6_14(hwnd: int, edit: int) -> None:
+    """读回整串：BMP 之外的字符必须原样落下，而不是被截断成另一个字符。
+
+    真机是唯一能证伪「`wScan` 装不下」的地方 —— 单测只看得见两个码元投了出去，
+    看不见系统把它们合并回一个字符。截断的签名很具体：`U+1F600` 变成 `U+F600`（私用区）。
+
+    日志里把这两个字符写成 `<U+1F600>` 形态，免得控制台打不出 emoji 时结论无法复核。
+    """
+    wanted = "emoji：\U0001F600\U0001F389 中文尾"
+    _clear_editor(edit, hwnd)
+    answer = cu_json("type", wanted, "--hwnd", hex(hwnd), "--session", SESSION,
+                     "--describe", "验收 6.14：非 BMP 字符", "--end")
+    detail = answer.get("result") or {}
+    time.sleep(0.5)
+    got = (_select_all_and_copy(hwnd, "验收 6.14") or "").replace("\r\n", "\n")
+    record("6.14", "通过" if got == wanted else "失败",
+           f"读回 {_show(got)}（期望 {_show(wanted)}）；"
+           f"截断签名 U+F600 出现 {got.count(chr(0xF600))} 次；via={detail.get('via')!r}")
+
+
+
+# ---------------------------------------------------------------------------
+# 6.15 带 `--hwnd` 的 `key` 把目标提到前台（DEC-082）
+# ---------------------------------------------------------------------------
+
+
+def check_6_15(hwnd: int, edit: int) -> None:
+    """构造「目标不在前台」，再看 `key` 能不能自己把前台抢回来。
+
+    干扰窗口是第二个记事本。带 `--hwnd` 的写命令自己会抢前台，所以对它点一下
+    就足以把前台让出去；此后对靶子发 `key ctrl+a` —— 抢前台没生效时这一串键会
+    落进干扰窗口：靶子既不会成为前台，也读不到选区。
+    """
+    other = W.spawn_notepad()
+    if other is None:
+        record("6.15", "跳过", "第二个记事本起不来，这条构造不出「目标不在前台」")
+        return
+    try:
+        W.move(other, 1250, 160, 620, 380, top=True)
+        time.sleep(1.2)
+        other_edit = W.child_window(other)
+        if other_edit is None:
+            record("6.15", "跳过", "干扰窗口里找不到编辑区")
+            return
+        _clear_editor(edit, hwnd)
+        do("type", "靶子在后台", "--hwnd", hex(hwnd), describe="验收 6.15：准备靶子文本")
+        time.sleep(0.4)
+        do("click", *map(str, W.client_to_screen(other_edit, 40, 40)),
+           "--hwnd", hex(other), describe="验收 6.15：把前台让给干扰窗口")
+        time.sleep(0.5)
+        before = W.foreground_hwnd()
+        code, _out, err = do("key", "ctrl+a", "--hwnd", hex(hwnd),
+                             describe="验收 6.15：对不在前台的靶子发键")
+        time.sleep(0.4)
+        after = W.foreground_hwnd()
+        got = (_copy_selection(hwnd, "验收 6.15") or "").strip()
+        ok = code == 0 and before == other and after == hwnd and got == "靶子在后台"
+        record("6.15", "通过" if ok else "失败",
+               f"发键前前台={before:#x}（干扰={other:#x}）· 发键后前台={after:#x}"
+               f"（靶子={hwnd:#x}）· 靶子选区读回={got!r}"
+               + ("" if code == 0 else f" · exit={code} {err.splitlines()[:1]}"))
+    finally:
+        W.close(other)
+
+
+# ---------------------------------------------------------------------------
 # 6.4 剪贴板降级路径（进程内注入失败，验真实的降级分支）
 # ---------------------------------------------------------------------------
 
@@ -376,7 +528,8 @@ def main() -> int:
         if arg == "--only" and index + 1 < len(sys.argv):
             only = {part.strip() for part in sys.argv[index + 1].split(",") if part.strip()}
     if not only:
-        only = {"6.1", "6.2", "6.3", "6.4", "6.5", "6.6", "6.7", "6.8", "6.9", "6.10"}
+        only = {"6.1", "6.2", "6.3", "6.4", "6.5", "6.6", "6.7", "6.8", "6.9", "6.10",
+                "6.11", "6.12", "6.14", "6.15"}
 
     def want(*items: str) -> bool:
         return any(item in only for item in items)
@@ -418,6 +571,14 @@ def main() -> int:
             check_6_7(hwnd, edit)
         if want("6.6"):
             check_6_6(hwnd)
+        if want("6.11"):
+            check_6_11(hwnd, edit)
+        if want("6.12"):
+            check_6_12(hwnd, edit)
+        if want("6.14"):
+            check_6_14(hwnd, edit)
+        if want("6.15"):
+            check_6_15(hwnd, edit)
         if want("6.4"):
             check_6_4(hwnd)      # 需要靶子还在前台，所以放在 6.10 之前
         if want("6.9"):
@@ -427,6 +588,10 @@ def main() -> int:
         if want("6.10"):
             check_6_10(hwnd)     # 最后做：它会把靶子关掉
     finally:
+        # 收尾：显式结束写序列，覆盖层撤下、输入还给用户，然后才去关窗口。
+        if SESSION:
+            do("move", *map(str, W.cursor_pos()),
+               describe="验收：收尾，结束这条写序列", keep=False)
         # 只关我们自己起的那一个窗口。**不要按进程名杀 notepad.exe** ——
         # 用户可能正开着记事本，那样会连他的窗口和未保存的内容一起杀掉。
         W.close(hwnd)

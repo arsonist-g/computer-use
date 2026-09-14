@@ -168,6 +168,11 @@ def cursor_pos() -> tuple[int, int]:
     return w.cursor_pos()
 
 
+def foreground_hwnd() -> int:
+    """当前前台窗口句柄（`GetForegroundWindow`），0 表示没有。"""
+    return int(w.foreground_hwnd())
+
+
 def settle(hwnd: int, quiet: float = 1.5, timeout: float = 15.0) -> tuple[int, int, int, int] | None:
     """等窗口自己消停下来，返回稳定的矩形。
 
@@ -283,17 +288,16 @@ def client_to_screen(hwnd: int, x: int, y: int) -> tuple[int, int]:
 def clipboard_get() -> str | None:
     """读文本剪贴板。读不到返回 None（不抛 —— 它不是被验的对象）。"""
     try:
-        proc = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
-                              capture_output=True, text=True, timeout=10)
-        return proc.stdout if proc.returncode == 0 else None
-    except (OSError, subprocess.SubprocessError):
+        from cu.desktop import clipboard
+        return clipboard.get_text()
+    except Exception:  # noqa: BLE001
         return None
 
 
 def clipboard_set(text: str) -> bool:
     try:
-        proc = subprocess.run(["clip"], input=text.encode("utf-16-le"),
-                              capture_output=True, timeout=10)
-        return proc.returncode == 0
-    except (OSError, subprocess.SubprocessError):
+        from cu.desktop import clipboard
+        clipboard.set_text(text)
+        return True
+    except Exception:  # noqa: BLE001
         return False
