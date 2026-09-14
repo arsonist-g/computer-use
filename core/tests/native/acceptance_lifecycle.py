@@ -402,7 +402,7 @@ def check_5_7() -> None:
     _code, _out, _err = cu("config", "set", "daemon_idle_exit_seconds", "5")
     try:
         session_id, _dir = begin("acceptance-5.7-overlay")
-        # `--continue`：保持窗口 120s，覆盖层与输入封锁都留在场上。
+        # `--continue`：保持窗口内（默认 30s），覆盖层与输入封锁都留在场上。
         write_noop(session_id, "验收 5.7：让覆盖层留在场上", keep_alive=True)
         pid = daemon_pid()
         # 结束会话 → 活动会话与写锁都没了，场上只剩覆盖层这一个理由。

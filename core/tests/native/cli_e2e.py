@@ -123,7 +123,7 @@ def main() -> int:
     code2, out2, _ = cu("config", "show")
     record("T10 config set/show 往返", code == 0 and '"overlay_continue_seconds": 90' in out2,
            f"set exit={code} · show 含新值={'\"overlay_continue_seconds\": 90' in out2}")
-    cu("config", "set", "overlay_continue_seconds", "120")     # 还原默认
+    cu("config", "set", "overlay_continue_seconds", "30")      # 还原默认
 
     # ---- T11 session list 与 end ----
     code, out, err = cu("session", "list")

@@ -51,7 +51,7 @@ computer-use skill uninstall
 | `image_format` | `png` | 截图默认格式；`--format` 可按次覆盖。 |
 | `lock_wait_seconds` | 10 | 写操作在报 `lock_timeout` 之前等写锁的时长。 |
 | `overlay_arm_ms` | 500 | 一段写序列开始前的延迟，给人把手从键盘上拿开的时间。这段时间里输入已经被封锁。 |
-| `overlay_continue_seconds` | 120 | 带 `--continue` 时，等你的下一条命令而保持覆盖层与输入封锁的时长。不带标志的写命令一结束，序列就结束。 |
+| `overlay_continue_seconds` | 30 | 带 `--continue` 时，等你的下一条命令而保持覆盖层与输入封锁的时长。不带标志的写命令一结束，序列就结束。 |
 | `overlay_exit_hold_ms` | 500 | 覆盖层退场之后输入还要再扣住这么久，免得那一瞬间的物理按键被吞掉。 |
 | `daemon_idle_exit_seconds` | 600 | 空闲这么久之后 daemon 退出。覆盖层或写锁在场时它绝不退出。 |
 | `daemon_log_level` | `info` | `info`、`warning` 或 `error`。调高可让嘈杂的日志安静下来。 |

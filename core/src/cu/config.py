@@ -9,7 +9,7 @@
 | `daemon_log_limit_bytes` / `daemon_log_level` | 500 MiB / info | DEC-038 / DEC-053（截头保尾；级别过滤，info = 全写） |
 | `lock_wait_seconds` | 10 | DEC-022 |
 | `overlay_arm_ms` | 500 | DEC-045（原 1500，缩短后仍够「让手离开」） |
-| `overlay_continue_seconds` | 120 | DEC-075（`--continue` 的保持窗口；不带标志时不留兜底保持） |
+| `overlay_continue_seconds` | 30 | DEC-075 / DEC-076（`--continue` 的保持窗口；不带标志时不留兜底保持） |
 | `overlay_exit_hold_ms` | 500 | DEC-045（退出保留期，避免与用户的物理动作撞上） |
 | `mouse_step_ms` / `mouse_max_points` | 10 / 30 | DEC-008（Q-015 待实测调整） |
 | `daemon_idle_exit_seconds` | 600 | DEC-035 |
@@ -85,7 +85,7 @@ class Config:
     #: `--continue` 的保持窗口：调用方说了还要继续，覆盖层与输入封锁就再留这么久
     #: （下一条命令什么时候来只有调用方知道，DEC-045）。不带这个标志时**不留兜底保持**
     #: （DEC-075）—— 「没说继续」的意思就是「这条之后结束了」，猜一个时长只会白扣用户的键鼠。
-    overlay_continue_seconds: int = 120
+    overlay_continue_seconds: int = 30
     #: 退出保留期：覆盖层撤下后，输入再扣住这么久才放行。
     overlay_exit_hold_ms: int = 500
     daemon_idle_exit_seconds: int = 600
