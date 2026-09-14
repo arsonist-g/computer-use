@@ -19,14 +19,14 @@ computer-use lock status
 
 ## 把本 skill 装进 agent
 
-这个包可以把本 skill 拷进调用方 agent 的技能目录：
+这个包可以把本 skill 拷进本机各 agent 家族的技能目录：
 
 ```
-computer-use skill install       # 把 SKILL.md 与 references/ 写到 ~/.claude/skills/computer-use/
+computer-use skill install       # 把 SKILL.md 与 references/ 写到 ~/.claude、~/.codex、~/.agents
 computer-use skill uninstall
 ```
 
-用 `COMPUTER_USE_SKILL_DIR` 可以装到别处。`computer-use --launcher-help` 列出启动器自己处理的命令，那也是它唯一自己处理的那些；其余命令都交给 Python 客户端。只装英文正式版；`*-zh.md` 校对译本留在包里不装。
+只有家族的根目录已存在才装进去，不给没装的 agent 凭空造目录；一个家族都没探测到时退回 Claude Code 的路径。用 `COMPUTER_USE_SKILL_DIR` 可以只装到指定的那一个目录。`computer-use --launcher-help` 列出启动器自己处理的命令，那也是它唯一自己处理的那些；其余命令都交给 Python 客户端。只装英文正式版；`*-zh.md` 校对译本留在包里不装。
 
 ## 本机命令
 
@@ -38,7 +38,7 @@ computer-use skill uninstall
 | `daemon stop` | | 停止 daemon。它会按需重新起来。 |
 | `setup omni` | `--force`（重装依赖，用来修损坏的环境）、`--skip-weights`（不下权重） | 建起解析器环境并下载权重（约 1.4 GB）。只有 `parse` 需要。 |
 | `env sync` | | 启动器命令。重建 Python 环境。 |
-| `skill install` / `skill uninstall` | | 启动器命令。把本 skill（SKILL.md 与 references/）拷进调用方 agent 的技能目录，或移除它。 |
+| `skill install` / `skill uninstall` | | 启动器命令。把本 skill（SKILL.md 与 references/）拷进本机各 agent 家族的技能目录，或移除它。 |
 
 ## 配置键
 

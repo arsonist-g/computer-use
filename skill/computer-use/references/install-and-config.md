@@ -19,14 +19,14 @@ computer-use lock status
 
 ## Installing this skill into an agent
 
-The package can copy this skill into the skill directory of the calling agent:
+The package can copy this skill into the skill directory of every agent family present on this machine:
 
 ```
-computer-use skill install       # writes SKILL.md and references/ to ~/.claude/skills/computer-use/
+computer-use skill install       # writes SKILL.md and references/ to ~/.claude, ~/.codex, ~/.agents
 computer-use skill uninstall
 ```
 
-Set `COMPUTER_USE_SKILL_DIR` to install somewhere else. `computer-use --launcher-help` lists the launcher's own commands, which are the only ones the launcher handles itself; everything else goes to the Python client. Only the English files in force are installed; the `*-zh.md` proofreading translations stay in the package.
+An agent family is targeted only when its root directory already exists, so nothing is created for an agent that is not installed; when no family is found, the install falls back to the Claude Code path. Set `COMPUTER_USE_SKILL_DIR` to install into exactly one directory instead. `computer-use --launcher-help` lists the launcher's own commands, which are the only ones the launcher handles itself; everything else goes to the Python client. Only the English files in force are installed; the `*-zh.md` proofreading translations stay in the package.
 
 ## Local commands
 
@@ -38,7 +38,7 @@ Set `COMPUTER_USE_SKILL_DIR` to install somewhere else. `computer-use --launcher
 | `daemon stop` | | Stops the daemon. It restarts on demand. |
 | `setup omni` | `--force` (reinstall the dependencies, to repair a broken environment), `--skip-weights` (build the environment without the weights) | Builds the parser environment and downloads its weights (about 1.4 GB). Needed only for `parse`. |
 | `env sync` | | Launcher command. Rebuilds the Python environment. |
-| `skill install` / `skill uninstall` | | Launcher commands. Copies this skill (SKILL.md and references/) into the calling agent's skill directory, or removes it. |
+| `skill install` / `skill uninstall` | | Launcher commands. Copies this skill (SKILL.md and references/) into the skill directory of every agent family present on this machine, or removes it. |
 
 ## Configuration keys
 

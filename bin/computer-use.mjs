@@ -295,11 +295,23 @@ function syncEnvironment({ force = false } = {}) {
 
 const SKILL_NAME = "computer-use";
 
+//: 技能目录按调用方 Agent 家族探测：只装到本机确实存在的家族根下，
+//: 不给没装的 Agent 凭空造目录。`~/.agents` 是跨 Agent 的共享技能根。
+const SKILL_FAMILY_ROOTS = [
+  [".claude", "skills"],
+  [".codex", "skills"],
+  [".agents", "skills"],
+];
+
 function skillDirs() {
   // 多个调用方 Agent 家族的技能目录。环境变量可覆盖，便于测试与非常规布局。
   if (process.env.COMPUTER_USE_SKILL_DIR) return [process.env.COMPUTER_USE_SKILL_DIR];
   const home = homedir();
-  return [join(home, ".claude", "skills", SKILL_NAME)];
+  const dirs = SKILL_FAMILY_ROOTS.filter(([root]) => existsSync(join(home, root))).map(
+    ([root, sub]) => join(home, root, sub, SKILL_NAME),
+  );
+  // 一个家族都没探测到时，退回 Claude Code 的历史默认落点（与 0.1.1 行为一致）。
+  return dirs.length > 0 ? dirs : [join(home, ".claude", "skills", SKILL_NAME)];
 }
 
 function installSkill() {
@@ -342,7 +354,7 @@ function printHelp() {
       "",
       "环境管理:",
       "  env sync              重新同步 Python 环境（升级后自动触发）",
-      "  skill install         把 skill（SKILL.md 与 references/）装到调用方 Agent 的技能目录",
+      "  skill install         把 skill 装到本机各 Agent 家族的技能目录（Claude Code / Codex / 共享根）",
       "  skill uninstall       移除已安装的 SKILL",
       "",
       "其余命令（begin / windows / screenshot / click / type / key / parse ...）",

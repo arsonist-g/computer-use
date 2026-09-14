@@ -96,14 +96,14 @@ computer-use parse --hwnd 0x1A2B --session s-...
 
 ## Agent skill
 
-The package carries the agent-facing skill and can copy it into the calling agent's skill directory:
+The package carries the agent-facing skill and can copy it into the skill directory of every agent family present on this machine:
 
 ```
-computer-use skill install       # writes SKILL.md and references/ to ~/.claude/skills/computer-use/
+computer-use skill install       # writes SKILL.md and references/ to ~/.claude, ~/.codex, ~/.agents
 computer-use skill uninstall
 ```
 
-Set `COMPUTER_USE_SKILL_DIR` to install somewhere else.
+An agent family is targeted only when its root directory already exists, so nothing is created for an agent that is not installed; when no family is found, the install falls back to the Claude Code path. Set `COMPUTER_USE_SKILL_DIR` to install into exactly one directory instead.
 
 ## Configuration
 
