@@ -10,6 +10,7 @@
     windows.py  窗口枚举、过滤、提权检测、hwnd 校验
     capture.py  四层降级截图栈
     input.py    SendInput + 拟人轨迹 + Unicode 输入
+    clipboard.py 剪贴板文本读写（`type` 的换行路径走它）
     overlay.py  控制覆盖层（分层窗口 + 逐像素 alpha + WDA）
     hooks.py    低级键鼠钩子（吞物理、放行注入、物理 Esc 中止）
 

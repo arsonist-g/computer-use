@@ -19,8 +19,8 @@ import math
 import random
 import time
 
-from .. import subproc
 from ..errors import CUError, ErrorCode
+from . import clipboard
 from . import win32 as w
 from .base import InputResult
 
@@ -261,25 +261,58 @@ def scroll(dx: int, dy: int, *, at: tuple[int, int] | None = None) -> InputResul
                        total_ms=int((time.monotonic() - started) * 1000))
 
 
-def type_text(text: str) -> InputResult:
-    """Unicode 输入。优先 `KEYEVENTF_UNICODE`，逐字符投递。
+def _has_line_break(text: str) -> bool:
+    """文本里有没有换行。`\n`、`\r\n`、单独的 `\r` 都算。"""
+    return "\n" in text or "\r" in text
 
-    spike 已实测这条路径可用（测试字符正是走它送达的），因此中文无需剪贴板中转。
-    剪贴板降级留给 `type` 在 Unicode 路径**确实失败**时使用 —— 不是默认路径，
-    因为剪贴板会破坏用户原有的剪贴板内容。
+
+def _utf16_units(ch: str) -> list[int]:
+    """把一个字符转成它要投递的 UTF-16 码元序列。
+
+    `KEYBDINPUT.wScan` 是 **16 位**：BMP 之外的字符（emoji 等）直接塞 `ord(ch)` 会被截断成
+    另一个码位。2026-09-14 真机实测 —— `U+1F600` 落下去变成 `U+F600`，**静默错字**，
+    不报错也不失败，比抛错更难发现（DEC-078）。所以非 BMP 字符拆成代理对两个码元，
+    由系统合并回一个字符。
+    """
+    code = ord(ch)
+    if code <= 0xFFFF:
+        return [code]
+    code -= 0x10000
+    return [0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF)]
+
+
+def type_text(text: str) -> InputResult:
+    """输入文本。**只插入文本，绝不合成 Enter 按键**（DEC-077）。
+
+    不含换行的文本走逐字 Unicode（`KEYEVENTF_UNICODE`），中文无需剪贴板中转 —— 这条路
+    spike 实测可用（测试字符正是走它送达的）。
+    BMP 之外的字符（emoji）同样走这条路，但按 UTF-16 拆成代理对投递（DEC-078）——
+    `wScan` 只有 16 位，装不下 BMP 之外的码位，会被静默截断成另一个字符。
+
+    含换行的文本走**剪贴板插入**（粘贴）：换行字符本身进不了控件。2026-09-14 真机实测 ——
+    Win11 记事本对 `\r` 与 `\n` 两种字符都无反应，`AA` + `\n` + `BB` 落下去仍是 `AABB`
+    （状态栏「4 个字符」）；而粘贴是控件自己的插入路径，换行能原样落下、且不触发按键绑定。
+    这正是要修的那半件事：合成 Enter 等于把「文本里有换行」和「按下 Enter 键」混为一谈，
+    在按 Enter 提交的应用（聊天框、搜索框）里，那会把半截内容直接发出去。
+
+    **要按键就用 `key`**：`key enter` 提交、`key ctrl+enter` 在聊天框里换行、`key win` 开开始菜单。
+    结果里的 `detail` 说明走了哪条路：含换行 → `via=clipboard` + `reason=newline`；
+    Unicode 路径真失败而降级 → `fallback=clipboard` + `unicode_error`。两条都带 `clipboard_restored`；
+    顺利走完的逐字 Unicode 路径不带任何路由信息（`detail` 里没有这些键）。
     """
     started = time.monotonic()
     if not text:
         return InputResult(ok=True, total_ms=0)
+    if _has_line_break(text):
+        detail = _type_via_clipboard(text)
+        return InputResult(ok=True, total_ms=int((time.monotonic() - started) * 1000),
+                           detail={"via": "clipboard", "reason": "newline", **detail})
     failures: list[str] = []
     try:
         for ch in text:
-            if ch == "\n":
-                # 换行走 VK_RETURN 而不是 Unicode 码点：多数控件只认按键。
-                _send(_key_input(0x0D), _key_input(0x0D, w.KEYEVENTF_KEYUP))
-                continue
-            _send(_key_input(0, w.KEYEVENTF_UNICODE, ord(ch)),
-                  _key_input(0, w.KEYEVENTF_UNICODE | w.KEYEVENTF_KEYUP, ord(ch)))
+            for unit in _utf16_units(ch):
+                _send(_key_input(0, w.KEYEVENTF_UNICODE, unit),
+                      _key_input(0, w.KEYEVENTF_UNICODE | w.KEYEVENTF_KEYUP, unit))
             time.sleep(0.002)
     except CUError as exc:
         failures.append(str(exc))
@@ -292,41 +325,36 @@ def type_text(text: str) -> InputResult:
 
 
 def _type_via_clipboard(text: str) -> dict:
-    """剪贴板降级：写入 → Ctrl+V → 尽量恢复原剪贴板。
+    """剪贴板插入：写入 → Ctrl+V → 尽量恢复原剪贴板。
 
     恢复失败不报错，但如实记进 detail —— 用户有权知道自己的剪贴板被动过。
     """
-    previous: str | None = None
+    previous = clipboard.get_text()
     try:
-        previous = subproc.run(
-            ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
-            capture_output=True, text=True, timeout=5).stdout
-    except Exception:  # noqa: BLE001
-        previous = None
-
-    try:
-        subproc.run(["clip"], input=text.encode("utf-16-le"), check=True, timeout=5)
-    except Exception as exc:  # noqa: BLE001
+        clipboard.set_text(text)
+    except CUError as exc:
         raise CUError(ErrorCode.INTERNAL_ERROR,
                       f"Unicode 输入失败，且剪贴板降级同样失败：{exc}") from exc
 
     key("ctrl+v")
 
     restored = False
-    if previous:
+    if previous is not None:
         try:
-            subproc.run(["clip"], input=previous.encode("utf-16-le"), check=True, timeout=5)
+            clipboard.set_text(previous)
             restored = True
-        except Exception:  # noqa: BLE001
+        except CUError:
             restored = False
     return {"clipboard_restored": restored}
 
 
 def _parse_combo(combo: str) -> list[int]:
-    """`ctrl+shift+f10` → vk 序列。支持 `ctrl+c` / `alt+tab` / `win+r` / `esc`。"""
+    """`ctrl+shift+f10` → vk 序列。**单键与组合键同一套写法**：`ctrl+c` / `alt+tab` / `win+r`，
+    单键 `enter` / `win` / `esc` / `f13`（DEC-077：按下一个键本身就是合法输入，
+    不需要为了「只按一个键」绕道组合键）。"""
     tokens = [t.strip().lower() for t in combo.replace(" ", "").split("+") if t.strip()]
     if not tokens:
-        raise CUError(ErrorCode.INVALID_PARAMS, f"空按键组合：{combo!r}")
+        raise CUError(ErrorCode.INVALID_PARAMS, f"空按键：{combo!r}")
     keys: list[int] = []
     for token in tokens:
         if token in _VK:
@@ -342,7 +370,12 @@ def _parse_combo(combo: str) -> list[int]:
 
 
 def key(combo: str, *, force: bool = False, danger_keys: frozenset[str] | None = None) -> InputResult:
-    """按组合键。命中黑名单则拒绝，`force=True` 越过（DEC-019）。"""
+    """按下按键：单键（`enter` / `win` / `esc`）或组合键（`ctrl+s`）都一样走这里。
+    命中黑名单则拒绝，`force=True` 越过（DEC-019）。
+
+    **文本里的换行不属于这里**：那是 `type` 的事（DEC-077）—— 要「提交」用 `key enter`，
+    要「在聊天框里换行」用该应用自己的绑定（多半是 `key ctrl+enter`）。
+    """
     started = time.monotonic()
     normalized = "+".join(t.strip().lower() for t in combo.split("+") if t.strip())
     blocked = danger_keys if danger_keys is not None else DEFAULT_DANGER_KEYS

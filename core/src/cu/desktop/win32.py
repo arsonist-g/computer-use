@@ -47,6 +47,10 @@ DWMWA_EXTENDED_FRAME_BOUNDS = 9
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 TOKEN_QUERY = 0x0008
 
+#: 剪贴板：`type` 的换行路径走它（DEC-077）。
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+
 #: `SetWindowDisplayAffinity` 的取值（DEC-027）：让覆盖层从**所有**截图管线消失。
 #: spike S2b 实测：本机 GPU/驱动下 WDA 同时挡住 WGC 与 DXGI Desktop Duplication。
 WDA_NONE = 0x00000000
@@ -222,6 +226,27 @@ kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
 kernel32.QueryFullProcessImageNameW.argtypes = [
     wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
 ]
+
+# 剪贴板（`type` 的换行路径，DEC-077）。句柄与 BOOL 都必须声明 restype ——
+# 不声明时 ctypes 按 32 位 int 截断（本文件开头第 1 条纪律），`GlobalLock` 尤其致命。
+kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalUnlock.restype = wintypes.BOOL
+kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+kernel32.GlobalFree.restype = wintypes.HGLOBAL
+kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.OpenClipboard.argtypes = [wintypes.HWND]
+user32.CloseClipboard.restype = wintypes.BOOL
+user32.CloseClipboard.argtypes = []
+user32.EmptyClipboard.restype = wintypes.BOOL
+user32.EmptyClipboard.argtypes = []
+user32.GetClipboardData.restype = wintypes.HANDLE
+user32.GetClipboardData.argtypes = [wintypes.UINT]
+user32.SetClipboardData.restype = wintypes.HANDLE
+user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
 
 user32.EnumWindows.restype = wintypes.BOOL
 user32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]

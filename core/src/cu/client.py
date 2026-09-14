@@ -164,11 +164,11 @@ def build_parser() -> argparse.ArgumentParser:
     scroll.add_argument("dy", type=int)
     scroll.add_argument("--at", nargs=2, type=int, default=None, metavar=("X", "Y"))
 
-    type_cmd = add("type", "输入文本")
+    type_cmd = add("type", "输入文本（含换行时经剪贴板粘贴插入，不合成 Enter 键）")
     type_cmd.add_argument("text")
     type_cmd.add_argument("--hwnd", default=None)
 
-    key = add("key", "按下组合键，如 ctrl+c / alt+tab / esc")
+    key = add("key", "按下按键：单键或组合键，如 enter / win / ctrl+c / alt+tab")
     key.add_argument("combo")
     key.add_argument("--hwnd", default=None)
     key.add_argument("--force", action="store_true", help="越过危险键黑名单（DEC-019）")
