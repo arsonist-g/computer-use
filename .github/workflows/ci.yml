@@ -24,14 +24,16 @@ jobs:
           uv pip install --python .venv/Scripts/python.exe -e ".[dev]"
 
       - name: ruff
-        run: .venv/Scripts/python.exe -m ruff check core/src core/tests
+        working-directory: core
+        run: .venv/Scripts/python.exe -m ruff check src tests
 
       - name: 单元测试
         working-directory: core
-        run: ../.venv/Scripts/python.exe -m pytest -q
+        run: .venv/Scripts/python.exe -m pytest -q
 
       - name: 红相验证（变异法）
-        run: .venv/Scripts/python.exe core/tests/native/red_verification.py --ci
+        working-directory: core
+        run: .venv/Scripts/python.exe tests/native/red_verification.py --ci
 
       - name: Node 启动器语法检查
         run: node --check bin/computer-use.mjs
