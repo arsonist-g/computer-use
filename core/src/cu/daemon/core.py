@@ -604,11 +604,13 @@ class Daemon:
                     self.config.overlay_arm_ms, self.config.overlay_continue_seconds,
                     keep_alive=bool(params.get("continue")),
                 )
-                if params.get("end"):
-                    self.controller.end_sequence()
-            self.controller.wait_for_arm(self.config.overlay_arm_ms)
-
-            result = action(expect)
+            try:
+                self.controller.wait_for_arm(self.config.overlay_arm_ms)
+                result = action(expect)
+            finally:
+                # 保护期从武装一直盖到这条命令**跑完**：`--end` 也在这里才生效。
+                # 覆盖层与封锁在派发输入期间必须在场 —— 那是它们唯一的意义。
+                self.controller.end_write(end=bool(params.get("end")))
             self.lock.heartbeat(session_id)
             entry.result = "ok" if result.ok else "error"
             entry.detail = _input_detail(result)
@@ -623,10 +625,9 @@ class Daemon:
             entry.result = "error"
             entry.error_code = exc.code.value
             entry.detail = exc.message
-            # 写操作失败 → 光谱冻结为红，等用户按 Esc 关闭（overlay.md §2.1）。
-            # 用户中止不算「出错」，那种情况 controller 内部已经切到 Stopping。
-            if exc.code is not ErrorCode.ABORTED_BY_USER:
-                self.controller.note_error()
+            # 写操作失败**不改覆盖层状态**（DEC-080）：失败由返回值与退出码表达，
+            # 不把屏幕变成一块要按 Esc 才能清掉的红。用户中止也一样 ——
+            # 那条路径上 controller 自己切到 Stopping（DEC-068）。
             raise
         finally:
             # 锁**不在这里释放**：锁由会话持有，跨多条写命令保持（DEC-004）。

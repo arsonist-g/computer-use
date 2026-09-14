@@ -8,7 +8,10 @@
 状态机（overlay.md §2 及其 Delta）：
 
     Off → Active（**从第一帧起就封锁输入**，前摇只是「还没有派发输入」的一段计时）
-        → Stopping/Error → Off
+        → Stopping → Off
+
+写操作失败**不改变覆盖层状态**（DEC-080）：失败只体现在命令的返回值里，
+覆盖层照常按保持窗口退场。
 
 **没有独立的「武装期」状态**：前摇是一个计时概念（`_armed_at` / `wait_for_arm`），
 不是一种要画出来的样子 —— 它与 Active 的光谱、胶囊文案、色相完全一致。单独留一个
@@ -60,6 +63,9 @@ class WriteSequenceController:
         self.blocker = InputBlocker(on_abort=self._handle_physical_esc)
         self._armed_at: float | None = None
         self._hold_until = 0.0
+        #: 有一条写命令正在跑（前摇 + 派发）。执行期间覆盖层与输入封锁**不许退场** ——
+        #: 由 `tick()` 挡着，`end_write()` 才放开。
+        self._in_flight = False
         #: 退出保留期的截止时刻。见 `tick()` 的说明。
         self._exit_release_at: float | None = None
         self._lock = threading.Lock()
@@ -115,6 +121,7 @@ class WriteSequenceController:
                     "用户已按 Esc 中止；本次未执行。请与用户确认后再继续 —— 确认后再次调用即可")
             # 只有显式续期才留保持窗口；不带标志 = 这条之后序列结束（DEC-075）。
             self._hold_until = now + (continue_seconds if keep_alive else 0.0)
+            self._in_flight = True
             if self.overlay.visible:
                 return                # 仍在保持窗口内：不重新起前摇，输入保持封锁
             self._armed_at = now
@@ -141,17 +148,11 @@ class WriteSequenceController:
                     "用户在前摇期间按下了 Esc；本次未执行。请与用户确认后再继续 —— 确认后再次调用即可")
             time.sleep(0.02)
 
-    def note_error(self) -> None:
-        """写操作失败 —— 光谱冻结为红，等用户按 Esc 关闭（DEC-030）。"""
-        with self._lock:
-            self.overlay.transition(OverlayState.ERROR)
-            # Error 态**不封锁输入**：AI 已不在操作任何元素，没有理由扣着用户的键鼠。
-            self.blocker.set_blocking(False)
-
     def abort(self, reason: str = "") -> None:
         """中止当前写序列。Stopping → Off（≤300ms）。"""
         with self._lock:
             self._aborted.set()
+            self._in_flight = False
             self.overlay.transition(OverlayState.STOPPING)
             # 中止的第一件事就是解除封锁 —— 用户按 Esc 就是为了拿回控制权。
             self.blocker.set_blocking(False)
@@ -169,6 +170,7 @@ class WriteSequenceController:
         在后一条路径上直接调 `resume()` 会自己把自己锁死。
         """
         self._aborted.clear()
+        self._in_flight = False
         self.overlay.transition(OverlayState.OFF)
         self.blocker.set_blocking(False)
 
@@ -179,7 +181,26 @@ class WriteSequenceController:
         退出保留期（DEC-045）仍然生效，不在这里立刻解封。
         """
         with self._lock:
+            self._in_flight = False
             self._hold_until = 0.0
+
+    def end_write(self, *, end: bool = False) -> None:
+        """一条写命令跑完了，保护期到此为止。
+
+        **执行期间不许退场**：主循环每 0.2s 一次 `tick()`，而前摇加上派发可能几秒 ——
+        若只按保持窗口判定，不带 `--continue` 的写命令（保持窗口一上来就是过期）
+        会在**输入还没派发**的时候就把覆盖层撤掉、把输入解封，用户看到的是
+        「覆盖层一闪而过，操作在没有保护的情况下继续」。
+
+        所以保护期由两件事共同决定：这条命令跑完了吗（`_in_flight`），
+        以及跑完之后还要不要留着（`_hold_until`，`--continue` 给）。
+
+        `end=True`（`--end`）表示这条就是序列的最后一条：不再保持，下一轮 tick 走退出路径。
+        """
+        with self._lock:
+            self._in_flight = False
+            if end:
+                self._hold_until = 0.0
 
     @property
     def aborted(self) -> bool:
@@ -208,13 +229,17 @@ class WriteSequenceController:
                 self._exit_release_at = None
                 return
 
+            # ⓪ 有写命令正在跑：前摇或派发都还没结束，谁也不许退。
+            if self._in_flight:
+                return
+
             # ① 已在保留期内：只看时间，不看可见性（见 docstring 的次序说明）。
             if self._exit_release_at is not None:
                 if time.monotonic() >= self._exit_release_at:
                     self._release_after_exit()
                 return
 
-            if not self.overlay.visible or self.overlay.state is OverlayState.ERROR:
+            if not self.overlay.visible:
                 return
 
             # ② 保持窗口未过：什么都不做。

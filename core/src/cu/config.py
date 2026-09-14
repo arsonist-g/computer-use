@@ -8,7 +8,7 @@
 | `storage_limit_bytes` | 1 GiB | DEC-017 / DEC-038（字节上限 + 最旧优先） |
 | `daemon_log_limit_bytes` / `daemon_log_level` | 500 MiB / info | DEC-038 / DEC-053（截头保尾；级别过滤，info = 全写） |
 | `lock_wait_seconds` | 10 | DEC-022 |
-| `overlay_arm_ms` | 500 | DEC-045（原 1500，缩短后仍够「让手离开」） |
+| `overlay_arm_ms` | 1500 | DEC-045 / DEC-079（前摇 1.5s：0.5s 一闪而过、看不清） |
 | `overlay_continue_seconds` | 30 | DEC-075 / DEC-076（`--continue` 的保持窗口；不带标志时不留兜底保持） |
 | `overlay_exit_hold_ms` | 500 | DEC-045（退出保留期，避免与用户的物理动作撞上） |
 | `mouse_step_ms` / `mouse_max_points` | 10 / 30 | DEC-008（Q-015 待实测调整） |
@@ -81,7 +81,9 @@ class Config:
     #: daemon 日志的级别下限：低于它的记录直接丢掉。默认 `info` = 全都写。
     daemon_log_level: str = "info"
     lock_wait_seconds: int = 10
-    overlay_arm_ms: int = 500
+    #: 前摇：写序列开始前先把覆盖层亮出来、输入同时扣住，给人把手从键盘上拿开的时间。
+    #: 0.5s 一闪而过、看不清覆盖层，2026-09-14 按实际观感定为 1.5s（DEC-079）。
+    overlay_arm_ms: int = 1500
     #: `--continue` 的保持窗口：调用方说了还要继续，覆盖层与输入封锁就再留这么久
     #: （下一条命令什么时候来只有调用方知道，DEC-045）。不带这个标志时**不留兜底保持**
     #: （DEC-075）—— 「没说继续」的意思就是「这条之后结束了」，猜一个时长只会白扣用户的键鼠。

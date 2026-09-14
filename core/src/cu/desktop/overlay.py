@@ -57,12 +57,15 @@ class OverlayState(StrEnum):
     由控制器用 `_armed_at` 记着，不是一种要画出来的样子：它与 Active 的光谱、
     胶囊文案、色相完全一致，单独留一个状态只会让「切换」这件事凭空多出来一次
     —— 而每次切换都要重建胶囊与目标框，那是一帧几百毫秒的卡顿。
+
+    **也没有 Error 态**（DEC-080）：写操作失败由命令的返回值与退出码表达，
+    不该变成一块只有按物理 Esc 才能清掉的红色覆盖层 —— 一条普通的失败
+    （例如没抢到前台）就能让它在屏幕上留很久，而且后续命令接管不了它。
     """
 
     OFF = "off"
     ACTIVE = "active"
     STOPPING = "stopping"
-    ERROR = "error"
 
 
 # ---------------------------------------------------------------------------
@@ -134,20 +137,17 @@ _CURSOR_COLOR = (255, 255, 255)
 #: 完整文案（供对照 overlay.md §2.1 的状态表）：
 #:   Active    `● AI is using your computer · [Esc] to cancel`
 #:   Stopping  `● Stopping`
-#:   Error     `● Something went wrong · [Esc] to dismiss`
 _PILL_CONTENT = {
     OverlayState.ACTIVE: ("AI is using your computer", "Esc", "to cancel"),
     OverlayState.STOPPING: ("Stopping", None, None),
-    OverlayState.ERROR: ("Something went wrong", "Esc", "to dismiss"),
 }
 #: 圆点色相（`--state-hue`）。Stopping 用暂停色，Error 用错误色。
 _PILL_HUE = {
     OverlayState.ACTIVE: 0.12,
     OverlayState.STOPPING: 0.09,
-    OverlayState.ERROR: 0.0,
 }
-#: Stopping / Error 的光谱**冻结**（不流动），且颜色固定。
-_FROZEN_HUE = {OverlayState.STOPPING: 0.09, OverlayState.ERROR: 0.0}
+#: Stopping 的光谱**冻结**（不流动），且颜色固定。
+_FROZEN_HUE = {OverlayState.STOPPING: 0.09}
 
 #: WDA 需要 Win10 2004 (build 19041) 以上（DEC-027 已核实的限制）。
 _WDA_MIN_BUILD = 19041
@@ -798,8 +798,8 @@ class ControlOverlay:
         这一步把 4K 全屏的 830 万像素压到实际需要计算的那一圈，
         是在不引入数值库的前提下让纯 Python 渲染可行的关键。
 
-        Stopping / Error 态**整条光晕是一个色相**（冻结琥珀 / 冻结红），不是
-        「一条不转的彩虹」。这两件事只差一行：冻结的是**色相本身**，不是
+        Stopping 态**整条光晕是一个色相**（冻结琥珀），不是「一条不转的彩虹」。
+        这两件事只差一行：冻结的是**色相本身**，不是
         光谱的旋转相位 —— 只冻相位的话，屏幕上仍是一片彩色，只是不流动了。
         """
         frozen = _FROZEN_HUE.get(state)

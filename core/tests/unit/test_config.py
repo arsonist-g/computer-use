@@ -37,9 +37,9 @@ CONTRACT_DEFAULTS = {
     "daemon_log_limit_bytes": 500 * 1024**2,  # 500 MiB = 524288000
     "daemon_log_level": "info",
     "lock_wait_seconds": 10,
-    # DEC-045：前摇 1500→500（缩短后仍够「让手离开」）。
+    # DEC-045 / DEC-079：前摇定在 1500ms（0.5s 一闪而过、看不清，按实际观感调回）。
     # DEC-075 / DEC-076：`--continue` 的保持窗口 30s；不带标志的写命令不留兜底保持。
-    "overlay_arm_ms": 500,
+    "overlay_arm_ms": 1500,
     "overlay_continue_seconds": 30,
     "overlay_exit_hold_ms": 500,
     "daemon_idle_exit_seconds": 600,

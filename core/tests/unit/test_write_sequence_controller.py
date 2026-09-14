@@ -123,6 +123,7 @@ def test_keep_alive_holds_until_the_continue_window_expires(ctrl) -> None:
     # keep_alive=True（来自 `--continue`）：调用方说了还要继续操作，保持窗口由
     # `continue_seconds` 给（daemon 传的是 config.overlay_continue_seconds）。
     controller.begin_write(arm_ms=500, continue_seconds=30, keep_alive=True)
+    controller.end_write()      # 这条写命令跑完了，保持窗口从这里开始算
     clock.advance(29.0)
     controller.tick(0)
     # oracle: specified —— DEC-045：窗口内覆盖层与封锁都保持。
@@ -140,9 +141,48 @@ def test_write_without_keep_alive_ends_the_sequence(ctrl) -> None:
     controller, clock = ctrl
     # continue_seconds 给得很大也没用：没有 keep_alive 就不设保持窗口。
     controller.begin_write(arm_ms=500, continue_seconds=1000)
+    controller.end_write()      # 「这条之后」= 这条**跑完**之后
     clock.advance(0.1)
     controller.tick(0)
-    # oracle: specified —— 「没说继续」= 这条之后结束了，输入立刻还给人。
+    # oracle: specified —— 「没说继续」= 这条跑完就结束了，输入立刻还给人。
+    assert controller.overlay.state is OverlayState.OFF
+    assert controller.blocker.blocking is False
+
+
+def test_tick_does_not_retire_the_overlay_while_a_write_is_in_flight(ctrl) -> None:
+    """写命令**执行期间**（前摇 + 派发）覆盖层与封锁都不退场。
+
+    主循环每 0.2s 一次 `tick`，而前摇加上派发可能几秒；不带 `--continue` 时保持窗口
+    一上来就是过期，于是 tick 会在**输入还没派发**的时候撤掉覆盖层、解封输入。
+    用户看到的就是「覆盖层一闪而过，操作在没有保护的情况下继续」。
+    """
+    controller, clock = ctrl
+    controller.begin_write(arm_ms=1500, continue_seconds=30)
+    for _ in range(20):         # 前摇与派发期间，主循环转了 20 轮（共 4 秒）
+        clock.advance(0.2)
+        controller.tick(exit_hold_ms=500)
+    # oracle: derived —— 这条命令还没跑完，保护期就没结束。
+    assert controller.overlay.state is OverlayState.ACTIVE
+    assert controller.blocker.blocking is True
+    # 跑完才轮到保持窗口判定：不带 `--continue`，退场。
+    controller.end_write()
+    controller.tick(exit_hold_ms=0)
+    assert controller.overlay.state is OverlayState.OFF
+    assert controller.blocker.blocking is False
+
+
+def test_end_write_with_the_end_flag_retires_even_when_kept_alive(ctrl) -> None:
+    """`--end` 在 end_write 上生效：这条就是最后一条，保持窗口作废。
+
+    daemon 曾经在**武装之后**立刻结束序列，于是最后一条命令 —— 也是最需要保护的那条 ——
+    在覆盖层已经撤下、输入已经解封之后才派发输入。
+    """
+    controller, clock = ctrl
+    controller.begin_write(arm_ms=500, continue_seconds=30, keep_alive=True)
+    controller.end_write(end=True)
+    clock.advance(0.1)
+    controller.tick(0)
+    # oracle: specified —— DEC-075：`--end` 之后不再保持。
     assert controller.overlay.state is OverlayState.OFF
     assert controller.blocker.blocking is False
 

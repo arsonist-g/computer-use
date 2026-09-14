@@ -50,7 +50,7 @@ class FakeController:
     def end_sequence(self) -> None:
         pass
 
-    def note_error(self) -> None:
+    def end_write(self, *, end: bool = False) -> None:
         pass
 
 
