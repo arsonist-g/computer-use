@@ -367,3 +367,44 @@ F7b / F8 / F9）；剩下 5 条（F1 / F4 / F5 / F10 / F11）于同日处置完�
   ① `move --at 100 100 --describe "t" --session <sid>`，在 1.5s 前摇内按物理 Esc → 该命令失败；
   ② 紧接着再发同样一条 → 应当**成功**（daemon 不重启、不需要别的命令）；
   ③ 另一条路径：没有任何写命令在跑时按 Esc，然后连发两条写命令 → 第一条被拒、第二条成功。
+
+---
+
+## 首发端到端（2026-09-14 · 用 npm 装出来的 0.1.0）
+
+这一轮的被测对象**不是**源码树里的 editable 安装，而是 `npm i -g` 装出来的 0.1.0：命令行是全局
+`computer-use`，daemon 从**包内**的 `core/src` 起。要回答的问题是「发出去的那个包本身能不能用」。
+
+| # | 判据 | 结果 |
+|---|---|---|
+| E1 | 包本体 | `computer-use 0.1.0`；首次运行自建环境（镜像 403 回退官方源一次，DEC-042 生效）✅ |
+| E2 | daemon 与窗口枚举 | `daemon status` 健康（协议版本、空闲时长、覆盖层/封锁状态齐全）；`windows` 正常 ✅ |
+| E3 | skill 安装 / 卸载 | 只装英文正式版；三份文件与包内**逐字节一致**；卸载只移除自身目录，其他 skill 未受影响 ✅ |
+| E4 | 会话 | `begin` / `session list` / `session info` 正常 ✅ |
+| E5 | 截图三种形态 | `--full` 3440×1440 `layer=wgc`；`--monitor 0` 同尺寸；`--hwnd` `origin=[0,0]`、3440×1380，与窗口 `rect=-9,-9,3458,1398` 每边差 9px（DWM 扩展框，DEC-050）✅ |
+| E6 | `type` 的多行 | `via=clipboard` · `reason=newline` · `clipboard_restored=true`；记事本里落下**三行字面量换行**、中文不乱码（状态栏 CRLF / UTF-8）；随后 `key enter` 单独加一行 —— DEC-077 的分工成立 ✅ |
+| E7 | 鼠标四类 | 单击；双击（选中 5 字符）；右键（弹出上下文菜单）；拖拽（选中 11 字符）✅ |
+| E8 | 键盘 | `ctrl+s` 弹出「另存为」（组合键确实到达应用）；`alt+tab` 把前台从记事本切到 VS Code；**自发的 `key esc` 返回 ok 且不进中止路径**（注入事件带 `LLKHF_INJECTED`，钩子无条件放行）；`win+l` 不带 `--force` 报 `dangerous_key_blocked`（exit=2），且失败那次也落了 `ops.md`（DEC-006）✅ |
+| E10 | 并发与写锁 | 同会话重入（连发多条写命令不互斥）；**另一会话**的写命令等满 `lock_wait_seconds`=10s 后 `lock_timeout`（exit=3，`detail` 带 `holder_session` / `holder_pid` / `held_for_s`）；等待期间 `lock status` 报 `waiting_sessions`；`lock unlock --force --reason` 真正释放，并同时写 daemon 日志与会话 `ops.md` ✅ |
+| E11 | daemon 生命周期 | 阈值临时压到 8s：两次独立实例都按阈值空闲退出（日志 `idle_for_s=8.0` / `9.9`）；**有活跃会话**或**覆盖层在场**（0 会话）时静置 14s 均不退出（硬不变式）；覆盖层退场后输入自动放行；硬杀进程后无残留管道，`daemon.lock` 只留一个诊断用 pid（文件锁由内核释放）✅ |
+| E12 | scroll | VS Code 编辑区顶行从 143 变 148（`scroll 0 -5`）✅ |
+| E9 | 物理 Esc 中止 | ⬜ **待跑**（须人手按物理键；合成输入带 `LLKHF_INJECTED`，程序造不出） |
+| E13 | QQ 群消息（用户指定） | ⬜ **待跑**（真实群、消息不可撤回，须用户在场确认） |
+
+### 本轮闭合的两条「未验证」项（2026-09-14）
+
+发布前审查轮留下的「输入封锁的崩溃恢复」与「覆盖层随进程消失」两条，本轮拿到了真机读数：
+起一条带 `--continue` 的写命令（`overlay_state=active`、`input_blocked=true`，且 `windows --all`
+能看到 `Computer-Use Overlay Pill` 与 `Computer-Use Overlay Glow` 两个窗口）→ **硬杀 daemon** →
+两个覆盖层窗口随进程一起消失、新起的 daemon 报 `input_blocked=false`（钩子随进程没了，物理输入立刻
+回到用户手里）、启动时 `orphaned=1`（把上一轮崩掉留下的活跃会话接管为孤儿）。
+（覆盖层本身**不可被任何截屏看到**是 DEC-027 的设计意图，见 §9.14；这里用的是窗口枚举，不依赖截图。）
+
+### 缺陷（H 系列，本轮新增）
+
+| # | 缺陷 | 证据 | 处置 |
+|---|---|---|---|
+| H1 | **`parse` 在 omni 未安装时崩在错误构造上**：应当报 `omni_not_installed`，实际抛 `TypeError: CUError.__init__() got an unexpected keyword argument 'hint'` | daemon 日志里的未捕获异常栈；`core/src/cu/desktop/omni.py` 与 `omni_setup.py` 各一处给 `CUError` 传了 `hint=` | ✅ **已修**：`hint` 是 `HINTS[code]` 派生的只读属性、不是构造参数（删掉这两处实参）。既有守卫 `tests/unit/test_errors.py`（每个错误码必须有静态 hint）正是这条设计的依据 |
+| H2 | **抢前台会把最大化的窗口还原**：写命令前置里无条件调 `ShowWindow(SW_RESTORE)`，而 `SW_RESTORE` 对**最大化**的窗口同样做「还原到原始大小与位置」 | 最大化记事本 `-9,-9,3458,1398` → 一条 `key f13 --hwnd` → `260,160,1020,560` | ✅ **本轮修**（DEC-085）：只在 `IsIconic` 时还原。守卫：`tests/unit/test_windows_foreground.py`（16 条：4 改期望 + 4 新增，红相 8 failed / 8 passed）。**真机复验**（源码版）：最大化 → `key --hwnd` 矩形不变且 `fg=1`；最小化 → 前置校验先报 `window_minimized`，即那次 `SW_RESTORE` 对写路径**不可达**，只是这一层自己的防御 |
+| H3 | **`lock unlock` 的人读文案恒为「锁空闲」**：刚踢掉一个活着的持有者也这么印 —— 人读分支只认 `lock status` 的 `holder` 字段，而 `lock.forceUnlock` 回的是 `released` / `previous_holder` | 同一次调用：`--json` 回 `{"released": true, "previous_holder": …}`，人读输出却是「锁空闲」，紧接着 `lock status` 确实空了 | ✅ **本轮修**：人读输出改报原持有者 |
+| H4 | 默认 `windows` **看不到应用的模态对话框**（`"另存为"` 这类有主窗口的附属窗被 GW_OWNER 规则滤掉）；`windows --all` 能列出来 | 让记事本 `ctrl+s` 弹出「另存为」：默认列表里没有它，`windows --all` 里有（`hwnd=0x00160CDE … "另存为"`） | ⬜ **记为口径、不算缺陷**：`windows` 是「应用窗口」清单（过滤规则写在 `windows.py::_is_top_level` 的 docstring 里），要看对话框用 `--all`。注意附属对话框会**占着前台**，此时发按键以焦点为准 |
