@@ -628,7 +628,7 @@ class Daemon:
             entry.detail = exc.message
             # 写操作失败**不改覆盖层状态**（DEC-080）：失败由返回值与退出码表达，
             # 不把屏幕变成一块要按 Esc 才能清掉的红。用户中止也一样 ——
-            # 那条路径上 controller 自己切到 Stopping（DEC-068）。
+            # 那条路径上 controller 自己把覆盖层撤下（DEC-068 / DEC-088）。
             raise
         finally:
             # 锁**不在这里释放**：锁由会话持有，跨多条写命令保持（DEC-004）。

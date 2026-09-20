@@ -343,24 +343,22 @@ def section4() -> None:
                    else "光晕不可见或系统光标异常")
 
         def check_4_4() -> None:
-            say("\n  【4.4】逐个显示两个状态，每态 8 秒。对照 overlay.md §2.1（含 Delta）：")
+            say("\n  【4.4】显示唯一在场的状态 8 秒。对照 overlay.md §2.1（含 Delta）：")
             say("        active   -> 流动光谱 / 胶囊: AI is using your computer · [Esc] to cancel")
             say("                    / 琥珀目标框 / 光标光晕")
-            say("        stopping -> **冻结成单一琥珀** / 胶囊: Stopping")
-            say("        注意：**没有独立的「武装期」样子** —— 前摇与 Active 完全同相")
-            say("        （同文案、同色相、同流速），所以它不再是一个要画出来的状态。")
-            say("        也没有 error 态（DEC-080）：写操作失败不再占用覆盖层。")
+            say("        注意：覆盖层只有在场与不在场两种样子 —— 没有独立的「武装期」样子")
+            say("        （前摇与 Active 同文案、同色相、同流速），也没有 error 态（DEC-080）")
+            say("        与 stopping 态（DEC-088）：失败与中止都不再占用覆盖层。")
             for state, note in (
                 (OverlayState.ACTIVE, "流动光谱 + 琥珀目标框 + 光标光晕"),
-                (OverlayState.STOPPING, "冻结单一琥珀（**不是**彩色的、只是不动的光谱）+ Stopping"),
             ):
                 say(f"        —— {state.value}：{note}")
                 show(state, 8.0, target=(900, 600, 400, 300), cursor=(1700, 700))
             overlay.transition(OverlayState.OFF)
             time.sleep(0.4)
-            answer = ask("两态的胶囊文案与光谱颜色都对吗？")
+            answer = ask("这个状态的胶囊文案与光谱颜色都对吗？")
             record("4.4", "通过" if answer.startswith("y") else "失败",
-                   "三态文案与光谱符合 overlay.md §2.1 及其 Delta" if answer.startswith("y")
+                   "在场状态的文案与光谱符合 overlay.md §2.1 及其 Delta" if answer.startswith("y")
                    else "与规范不符")
 
         def check_4_5() -> None:
@@ -421,12 +419,10 @@ def section4() -> None:
             time.sleep(0.8)
             say("        —— OFF → Active（覆盖层出现）")
             show(OverlayState.ACTIVE, 8.0, target=(900, 600, 400, 300), cursor=(1700, 700))
-            say("        —— Active → Stopping")
-            show(OverlayState.STOPPING, 5.0)
-            say("        —— Stopping → OFF（冻结态撤下）")
+            say("        —— Active → OFF（中止：当场撤下，没有中间态）")
             overlay.transition(OverlayState.OFF)
             time.sleep(0.8)
-            say("        —— OFF → Active（再出现一次，看冻结态回到流动是否连续）")
+            say("        —— OFF → Active（再出现一次，看光谱是否连续）")
             show(OverlayState.ACTIVE, 5.0, target=(900, 600, 400, 300), cursor=(1700, 700))
             overlay.transition(OverlayState.OFF)
             time.sleep(0.3)

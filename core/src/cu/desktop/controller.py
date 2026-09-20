@@ -8,10 +8,14 @@
 状态机（overlay.md §2 及其 Delta）：
 
     Off → Active（**从第一帧起就封锁输入**，前摇只是「还没有派发输入」的一段计时）
-        → Stopping → Off
+        → Off
 
 写操作失败**不改变覆盖层状态**（DEC-080）：失败只体现在命令的返回值里，
 覆盖层照常按保持窗口退场。
+
+**没有 Stopping 态**（DEC-088）：中止就是当场撤下覆盖层并解封输入，不再画一个
+「正在停止」的样子 —— 它只能活到下一轮 tick（约 0.2s），人几乎看不见，
+却让每条路径都多一个状态要处理。
 
 **没有独立的「武装期」状态**：前摇是一个计时概念（`_armed_at` / `wait_for_arm`），
 不是一种要画出来的样子 —— 它与 Active 的光谱、胶囊文案、色相完全一致。单独留一个
@@ -149,11 +153,15 @@ class WriteSequenceController:
             time.sleep(0.02)
 
     def abort(self, reason: str = "") -> None:
-        """中止当前写序列。Stopping → Off（≤300ms）。"""
+        """中止当前写序列：**直接撤下覆盖层**、立刻解除封锁。
+
+        没有中间态（DEC-088）：覆盖层只有两种样子 —— 在场（Active）与不在场。
+        「正在停止」那一格只能活到下一轮 tick（约 0.2s），人几乎看不见。
+        """
         with self._lock:
             self._aborted.set()
             self._in_flight = False
-            self.overlay.transition(OverlayState.STOPPING)
+            self.overlay.transition(OverlayState.OFF)
             # 中止的第一件事就是解除封锁 —— 用户按 Esc 就是为了拿回控制权。
             self.blocker.set_blocking(False)
         self.notify()
@@ -259,7 +267,16 @@ class WriteSequenceController:
         self._exit_release_at = None
 
     def _handle_physical_esc(self) -> None:
-        """物理 Esc（低级钩子识别，注入的 Esc 不会走到这里）。"""
+        """物理 Esc（低级钩子识别，注入的 Esc 不会走到这里）。
+
+        钩子只在**封锁期间**认这枚键（见 `hooks.py`），但封锁比覆盖层多活一小段：
+        退场保留期（DEC-045）里覆盖层已经撤下、输入还没放行。那 0.5s 内按 Esc
+        没有可中止的东西 —— 屏幕上没有任何提示，用户只是随手一按 ——
+        把它记成「用户中止」会让**下一条**写命令平白被拒（DEC-068 的一次性闸门）。
+        所以判据是「覆盖层在场」，不是「输入被封锁」。
+        """
+        if not self.overlay.visible:
+            return
         self.abort("用户按下物理 Esc")
         if self.on_abort is not None:
             self.on_abort()

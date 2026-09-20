@@ -61,11 +61,14 @@ class OverlayState(StrEnum):
     **也没有 Error 态**（DEC-080）：写操作失败由命令的返回值与退出码表达，
     不该变成一块只有按物理 Esc 才能清掉的红色覆盖层 —— 一条普通的失败
     （例如没抢到前台）就能让它在屏幕上留很久，而且后续命令接管不了它。
+
+    **也没有 Stopping 态**（DEC-088）：中止当场撤下覆盖层（控制器 `abort()`
+    直接转 OFF），不再画一个「正在停止」的样子 —— 它只能活到下一轮 tick
+    （约 0.2s），人几乎看不见，却给每条路径都多添一个状态。
     """
 
     OFF = "off"
     ACTIVE = "active"
-    STOPPING = "stopping"
 
 
 # ---------------------------------------------------------------------------
@@ -136,18 +139,13 @@ _CURSOR_COLOR = (255, 255, 255)
 #: 胶囊内容：`(主文案, 键名, 尾文案)`。键名为 None 时不画键帽。
 #: 完整文案（供对照 overlay.md §2.1 的状态表）：
 #:   Active    `● AI is using your computer · [Esc] to cancel`
-#:   Stopping  `● Stopping`
 _PILL_CONTENT = {
     OverlayState.ACTIVE: ("AI is using your computer", "Esc", "to cancel"),
-    OverlayState.STOPPING: ("Stopping", None, None),
 }
-#: 圆点色相（`--state-hue`）。Stopping 用暂停色，Error 用错误色。
+#: 圆点色相（`--state-hue`）。
 _PILL_HUE = {
     OverlayState.ACTIVE: 0.12,
-    OverlayState.STOPPING: 0.09,
 }
-#: Stopping 的光谱**冻结**（不流动），且颜色固定。
-_FROZEN_HUE = {OverlayState.STOPPING: 0.09}
 
 #: WDA 需要 Win10 2004 (build 19041) 以上（DEC-027 已核实的限制）。
 _WDA_MIN_BUILD = 19041
@@ -798,16 +796,11 @@ class ControlOverlay:
         这一步把 4K 全屏的 830 万像素压到实际需要计算的那一圈，
         是在不引入数值库的前提下让纯 Python 渲染可行的关键。
 
-        Stopping 态**整条光晕是一个色相**（冻结琥珀），不是「一条不转的彩虹」。
-        这两件事只差一行：冻结的是**色相本身**，不是
-        光谱的旋转相位 —— 只冻相位的话，屏幕上仍是一片彩色，只是不流动了。
+        `state` 目前**不改变光晕的样子**：唯一的可见态就是 Active。保留这个形参
+        是为了几块表面签名一致（`_sync_pill` / `_sync_target` / `_sync_cursor`
+        都按状态取内容），而不是这里还藏着另一条分支。
         """
-        frozen = _FROZEN_HUE.get(state)
         angle0 = self._phase()
-        frozen_rgb = None
-        if frozen is not None:
-            red, green, blue = colorsys.hsv_to_rgb(frozen, 0.85, 1.0)
-            frozen_rgb = (red, green, blue)
 
         buffer = bytearray(width * height * 4)
         cx, cy = width / 2.0, height / 2.0
@@ -838,13 +831,10 @@ class ControlOverlay:
                     value = int(t ** _FALLOFF_EXPONENT * alpha_scale * vertical)
                     if value <= 1:
                         continue
-                    if frozen_rgb is None:
-                        # 色相沿**屏幕中心的方向角**走 —— 光谱是绕一圈的环，不是沿边平移。
-                        hue = (math.atan2((y + 0.5) - cy, (x + 0.5) - cx)
-                               / two_pi + angle0) % 1.0
-                        red, green, blue = hsv_to_rgb(hue, 0.85, 1.0)
-                    else:
-                        red, green, blue = frozen_rgb
+                    # 色相沿**屏幕中心的方向角**走 —— 光谱是绕一圈的环，不是沿边平移。
+                    hue = (math.atan2((y + 0.5) - cy, (x + 0.5) - cx)
+                           / two_pi + angle0) % 1.0
+                    red, green, blue = hsv_to_rgb(hue, 0.85, 1.0)
                     index = row + x * 4
                     buffer[index] = int(blue * value)
                     buffer[index + 1] = int(green * value)

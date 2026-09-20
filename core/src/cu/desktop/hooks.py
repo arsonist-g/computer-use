@@ -7,7 +7,8 @@
     「输入被永久封锁」在机制上不成立，**靠的就是这条**。
   - 只吞**物理**事件（`LLKHF_INJECTED` / `LLMHF_INJECTED` 未置位），
     放行注入事件 —— 否则 AI 自己的 SendInput 会被自己吞掉。spike Q3b 已实测标志可靠。
-  - 物理 Esc 永远可用，且被吞掉后触发中止。
+  - 物理 Esc 永远可用：**封锁期间**它被吞掉并触发中止；空闲时这个钩子不碰任何按键
+    （钩子随 daemon 常驻、空闲时也挂在输入链路上 —— 见 `_keyboard_hook` 的说明）。
   - 钩子处理函数必须极快返回：超时会被 Windows 静默摘除，输入恢复但**封锁静默失效**。
     因此这里只做标志判断与回调投递，不做任何阻塞或耗时计算。
 
@@ -178,7 +179,14 @@ class InputBlocker:
                 return w.user32.CallNextHookEx(None, code, wparam, lparam)
 
             is_down = wparam in (w.WM_KEYDOWN, w.WM_SYSKEYDOWN)
-            if is_down and info.vkCode == w.VK_ESCAPE and not self._abort_latched:
+            # 「中止」只在**封锁期间**成立。
+            #
+            # 钩子随 daemon 一起装、一直挂在系统输入链路上（上面那条安全底线：daemon 死亡
+            # 才摘钩），而封锁只在写序列期间生效 —— 少了 `_blocking` 这个前提，daemon
+            # **空闲时**用户按的每一个 Esc 都会被读成一次中止：覆盖层闪一下、闩住**下一条**
+            # 写命令，而且这一下按键被吞掉、到不了用户当时正在用的程序。
+            if is_down and self._blocking.is_set() and info.vkCode == w.VK_ESCAPE \
+                    and not self._abort_latched:
                 # 物理 Esc：**先把封锁解除，再通知回调**。
                 #
                 # 顺序与「无条件解封」都是安全底线，不是选择：

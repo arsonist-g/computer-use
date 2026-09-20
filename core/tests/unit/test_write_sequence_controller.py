@@ -244,8 +244,8 @@ def test_abort_releases_immediately_without_hold(ctrl) -> None:
     # oracle: specified —— 中止的第一件事就是解除封锁，不等退出保留期。
     assert controller.blocker.blocking is False
     assert controller.aborted is True
-    # oracle: specified —— 中止进入 Stopping 态。
-    assert controller.overlay.state is OverlayState.STOPPING
+    # oracle: specified —— 中止**直接撤下覆盖层**（DEC-088：没有 Stopping 态）。
+    assert controller.overlay.state is OverlayState.OFF
 
 def test_abort_refuses_exactly_one_write_command_and_does_not_latch(ctrl) -> None:
     """DEC-068：中止是**一次性**闸门 —— 挡住下一条写命令，然后自己清掉。"""
@@ -283,3 +283,45 @@ def test_abort_during_the_arming_pause_consumes_the_latch(ctrl) -> None:
 
     controller.begin_write(arm_ms=500, continue_seconds=0)
     assert controller.overlay.state is OverlayState.ACTIVE
+
+
+def test_physical_esc_outside_a_write_sequence_is_not_an_abort(ctrl) -> None:
+    """空闲时按物理 Esc 不算中止（DEC-088）。
+
+    钩子随 daemon 常驻，空闲时也挂在输入链路上。若把那时按的 Esc 记成中止，
+    后果之一正是「下一条写命令被 DEC-068 的一次性闸门平白拒掉」——
+    用户看到的是「AI 说我按过 Esc，可我没按」。
+    """
+    controller, _clock = ctrl
+    controller.start()
+    controller._handle_physical_esc()
+
+    # oracle: derived —— 覆盖层不在场 ⟹ 没有可中止的东西。
+    assert controller.aborted is False
+    assert controller.overlay.state is OverlayState.OFF
+    assert controller.blocker.blocking is False
+
+    # oracle: specified —— 覆盖层在场时，它才是中止。
+    controller.begin_write(arm_ms=500, continue_seconds=0)
+    controller._handle_physical_esc()
+    assert controller.aborted is True
+    assert controller.overlay.state is OverlayState.OFF
+
+
+def test_physical_esc_in_the_exit_hold_is_not_an_abort(ctrl) -> None:
+    """退场保留期里按 Esc 也不算中止 —— 那时覆盖层已经撤下、输入还没放行。"""
+    controller, clock = ctrl
+    controller.begin_write(arm_ms=500, continue_seconds=1000, keep_alive=True)
+    controller.end_sequence()
+    controller.tick(exit_hold_ms=500)
+    assert controller.overlay.state is OverlayState.OFF
+    assert controller.blocker.blocking is True
+
+    controller._handle_physical_esc()
+
+    # oracle: derived —— 判据是「覆盖层在场」，不是「输入被封锁」。
+    assert controller.aborted is False
+    # oracle: specified —— 保留期本身不受影响：过了截止时刻照旧解封。
+    clock.advance(0.6)
+    controller.tick(exit_hold_ms=500)
+    assert controller.blocker.blocking is False

@@ -513,49 +513,6 @@ def t9_overlay_window_does_not_hang() -> None:
         overlay.stop()
 
 
-def t10_frozen_states_are_single_hue() -> None:
-    """Stopping / Error 的光晕必须**冻结成一个色相**，而不是「一条不转的彩虹」。
-
-    这条守卫来自一次真机验收失败：§4.4 报「与规范不符」，使用者的描述是
-    「stopping 跟 error 的那两个颜色没展示出来，都一直是那个彩色的光谱」。
-    根因是代码冻结的是光谱的**旋转相位**，不是色相本身 —— 只冻相位的话，
-    屏幕上仍是一片彩色，只是不流动了。这两件事只差一行，从代码上看都很合理。
-
-    判据：把饱和像素的色相装箱，冻结态只应落进一个箱，流动态应落进多个。
-    """
-    import colorsys  # noqa: PLC0415
-
-    from cu.desktop.overlay import ControlOverlay, OverlayState, _read_screen  # noqa: PLC0415
-
-    def hue_bins(state) -> int:
-        overlay._state = state
-        glow = overlay._build_glow(screen, 240, 100, state)
-        bins = set()
-        for index in range(0, len(glow), 4):
-            alpha = glow[index + 3]
-            if alpha <= 60:
-                continue
-            # 缓冲是**预乘**的，先除回去再取色相。
-            red = glow[index + 2] / alpha
-            green = glow[index + 1] / alpha
-            blue = glow[index] / alpha
-            bins.add(round(colorsys.rgb_to_hsv(red, green, blue)[0] * 24))
-        return len(bins)
-
-    overlay = ControlOverlay()
-    screen = _read_screen()
-    overlay._screen = screen
-    frozen = {OverlayState.STOPPING.value: hue_bins(OverlayState.STOPPING)}
-    flowing = {
-        state.value: hue_bins(state)
-        for state in (OverlayState.ACTIVE,)
-    }
-    record(
-        "T10 冻结态是单一色相、流动态是光谱",
-        all(count <= 1 for count in frozen.values())
-        and all(count >= 6 for count in flowing.values()),
-        f"冻结态色相箱数 {frozen}（期望各 ≤1）· 流动态色相箱数 {flowing}（期望各 ≥6）",
-    )
 
 
 def t11_spectrum_phase_is_continuous() -> None:
@@ -637,7 +594,6 @@ def main() -> int:
     t6_overlay_exclusion(out_dir)
     t7_target_ring()
     t8_glow_is_at_edges()
-    t10_frozen_states_are_single_hue()
     t11_spectrum_phase_is_continuous()
     t9_overlay_window_does_not_hang()
     if args.blocking:
