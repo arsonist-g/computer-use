@@ -13,7 +13,7 @@ opencv / PIL / numpy）—— 客户端每次命令都是新解释器，import �
 OmniParser 跑在独立的 omni 环境里，与本包零代码共享。
 """
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 # 客户端与 daemon 之间的协议版本。不匹配时 daemon 返回 protocol_version_mismatch，
 # 客户端自动重启 daemon 后重试一次（api-contract.md §3 约定 4）。

@@ -1,6 +1,6 @@
 {
   "name": "@arsonist-g/computer-use",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Windows desktop control for AI agents: screens, windows, mouse, keyboard, and structured UI parsing",
   "license": "MIT",
   "author": "arsonist-g",
