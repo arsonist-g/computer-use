@@ -14,6 +14,11 @@
     models/icon_caption_florence/  描述权重 + Florence-2 远程代码
 
 不装 paddleocr / paddlepaddle / flash_attn —— 理由见 DEC-044。
+
+**第四条坑（2026-09-24 实测）**：Windows 上 PyPI 的 `torch` 轮子是 **CPU 版**，
+而「装错了」的表现不是报错，是慢两个数量级 —— 本机 3440x1440 全屏截图
+CPU 163s / GPU 2.5s。有 N 卡的机器必须从 PyTorch 自己的索引装 `+cu128` 轮子。
+见 `TORCH_INDEX_URL`。
 """
 
 from __future__ import annotations
@@ -52,7 +57,6 @@ FLORENCE_REPO = "microsoft/Florence-2-base-ft"
 #: streamlit / boto3 / groq 等 —— 它们要么用不到，要么会硬失败（DEC-044）。
 PACKAGES = (
     "numpy==1.26.4",
-    "torch", "torchvision",
     "ultralytics==8.3.70",
     TRANSFORMERS_PIN,
     "timm", "einops==0.8.0", "accelerate",
@@ -62,6 +66,17 @@ PACKAGES = (
     # 但它是模块级导入，不装就 import 不了。它很轻，装比绕开简单。
     "openai",
 )
+
+#: PyTorch 单独装：装哪一个轮子取决于机器有没有 N 卡，而两者**不是同一个来源**。
+#:
+#: 2026-09-24 实测：PyPI（含国内各镜像）上的 `torch-2.14.0-cp312-cp312-win_amd64.whl`
+#: 只有 124MB —— 那是 CPU 版，`torch.cuda.is_available()` 为 False。CUDA 轮子带
+#: `+cu128` 本地版本号、2.6GB，只发布在 PyTorch 自己的索引上。**装错不报错**，
+#: 代价是 CPU 推理：本机 3440x1440 全屏截图 163s（GPU 2.5s）。
+TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu128"
+CPU_PACKAGES = ("torch", "torchvision")
+#: 与 cu128 索引配套的一对（torchvision 0.26 ↔ torch 2.11）。
+CUDA_PACKAGES = ("torch==2.11.0", "torchvision==0.26.0")
 
 ENV_PYPI_MIRROR = "COMPUTER_USE_OMNI_INDEX_URL"
 ENV_HF_MIRROR = "COMPUTER_USE_HF_ENDPOINT"
@@ -92,22 +107,68 @@ def _uv() -> str:
     return found
 
 
-def _uv_install(python: Path, packages: tuple[str, ...]) -> None:
-    """装依赖。镜像失败时单次回退官方源，并把两次的原委都透出来（DEC-042）。"""
+def _uv_install(python: Path, packages: tuple[str, ...], *, index: str | None = None) -> None:
+    """装依赖。镜像失败时单次回退官方源，并把两次的原委都透出来（DEC-042）。
+
+    `index` 显式给出时**只用它**：CUDA 版 torch 只发布在 PyTorch 自己的索引上，
+    PyPI 的镜像和官方源都没有它 —— 那两个源能装上的只有 CPU 版。
+    """
+    uv = _uv()
+    base = [uv, "pip", "install", "--python", str(python), *packages]
+    if index is not None:
+        if _run(base + ["--index-url", index]) != 0:
+            raise CUError(
+                ErrorCode.OMNI_NOT_INSTALLED,
+                f"从 {index} 安装 PyTorch 失败。该索引在部分网络下需要走代理，"
+                "可设置 HTTPS_PROXY 后重试。",
+            )
+        return
     mirror = os.environ.get(ENV_PYPI_MIRROR)
-    base = [_uv(), "pip", "install", "--python", str(python), *packages]
     attempts = []
     if mirror:
         attempts.append(base + ["--index-url", mirror])
     attempts.append(base + ["--index-url", "https://pypi.org/simple"])
-    for index, argv in enumerate(attempts):
+    for attempt, argv in enumerate(attempts):
         if _run(argv) == 0:
             return
-        if index + 1 < len(attempts):
+        if attempt + 1 < len(attempts):
             _log("索引不可用，回退 https://pypi.org/simple 重试一次（DEC-042）")
     raise CUError(ErrorCode.OMNI_NOT_INSTALLED,
                   "omni 依赖安装失败。若报 403/404，通常是镜像源不含某个包；"
                   f"可用 {ENV_PYPI_MIRROR} 指定索引后重试。")
+
+
+def _gpu_present() -> bool:
+    """机器上有没有 NVIDIA 显卡。
+
+    这一步决定下 2.6GB 的 CUDA 轮子还是 124MB 的 CPU 轮子。用 `nvidia-smi` 判：
+    它随驱动装、在 PATH 上，比任何 WMI/注册表查询都直接。
+    """
+    return shutil.which("nvidia-smi") is not None
+
+
+def _install_torch(python: Path) -> None:
+    """按有没有 N 卡选 torch 的来源，并**如实报出装完是哪个**。
+
+    「装错不报错」是这一条最坏的部分：CPU 轮子功能完全正常，只是慢两个数量级。
+    所以装完立刻回读一次 `torch.cuda.is_available()` —— 那是唯一能分辨两者的判据。
+    """
+    if not _gpu_present():
+        _log("未检测到 NVIDIA 显卡，安装 CPU 版 PyTorch")
+        _uv_install(python, CPU_PACKAGES)
+        return
+
+    _log(f"检测到 NVIDIA 显卡，从 {TORCH_INDEX_URL} 安装 CUDA 版 PyTorch（约 2.6GB）")
+    _uv_install(python, CUDA_PACKAGES, index=TORCH_INDEX_URL)
+    probe = subproc.run(
+        [str(python), "-c",
+         "import torch;print(torch.__version__, torch.cuda.is_available())"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+    )
+    report = (probe.stdout or probe.stderr or "").strip().splitlines()[-1:] or [""]
+    _log(f"PyTorch 就位：{report[0]}")
+    if "True" not in report[0]:
+        _log("警告：torch.cuda.is_available() 不是 True —— 识别会退到 CPU，慢两个数量级")
 
 
 #: 在 **omni 环境**里执行的下载脚本（`python -c` 的源码）。
@@ -180,6 +241,18 @@ def _weight_tasks(models: Path) -> list[dict]:
                       "target": caption_dir / name,
                       "rel": f"icon_caption_florence/{name}"})
     return tasks
+
+
+def _weights_complete(models: Path) -> bool:
+    """权重是否**齐**。判据就是下载清单本身 —— 少一件都不算装好。
+
+    为什么不能只看 `icon_caption_florence/config.json`：那是清单里**最小**的一件。
+    2026-09-24 首次安装正好撞上这个 —— 1.08GB 的 `model.safetensors` 传到 28MB 断了，
+    而 config.json 已经落盘，于是重跑被判定为「权重已就位」直接跳过，
+    `run_setup` 一路报到 `ready: True`。**真正的模型文件从头到尾没人检查过**，
+    直到 `parse` 才炸，而那时报的是 transformers 的加载错，指着的是「模型坏了」。
+    """
+    return all(task["target"].is_file() for task in _weight_tasks(models))
 
 
 def _parse_progress(line: str) -> dict | None:
@@ -293,10 +366,11 @@ def run_setup(*, force: bool = False, skip_weights: bool = False) -> dict:
     else:
         _log(f"源码已存在 {source}")
 
-    # ---- 3. 依赖（最小集 + 锁定的 transformers）----
+    # ---- 3. 依赖（最小集 + 锁定的 transformers + 按显卡选的 torch）----
     if force or not _venv_has(python, ("torch", "transformers", "easyocr")):
         _log("安装依赖（最小集，transformers 锁定 4.44.2 —— 见 DEC-044）")
         _uv_install(python, PACKAGES)
+        _install_torch(python)
         steps.append("安装依赖")
     else:
         _log("依赖已就位")
@@ -304,8 +378,7 @@ def run_setup(*, force: bool = False, skip_weights: bool = False) -> dict:
     # ---- 4. 权重 ----
     if skip_weights:
         _log("按参数跳过权重下载")
-    elif not (models / "icon_detect_v3" / "model.pt").is_file() \
-            or not (models / "icon_caption_florence" / "config.json").is_file():
+    elif not _weights_complete(models):
         _log(f"下载权重到 {models}（约 1.4 GB，首次较慢）")
         _download_weights(models)
         steps.append("下载权重")
@@ -364,11 +437,9 @@ def status() -> dict:
         if missing:
             info["ready"] = False
             info["reason"] = f"缺少依赖：{', '.join(missing)}"
-    detector = models / "icon_detect_v3" / "model.pt"
-    caption = models / "icon_caption_florence" / "config.json"
-    if not detector.is_file() or not caption.is_file():
+    if not _weights_complete(models):
         info["ready"] = False
-        info["reason"] = "权重不完整（缺检测器或描述模型）"
+        info["reason"] = "权重不完整（缺检测器 / 描述模型 / Florence-2 远程代码之一）"
     return info
 
 

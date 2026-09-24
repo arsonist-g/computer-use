@@ -100,6 +100,9 @@ class Daemon:
         self.lock = WriteLock()
         self.started_at = now_iso()
         self._booted_at = time.monotonic()
+        #: 用过解析的会话（DEC-014）。`omni_refcount` 就是它的规模 —— 两者不是两份状态，
+        #: 而是「集合」与「它的大小」；分开写只是为了让状态报告读起来是一句话。
+        self._omni_sessions: set[str] = set()
         self.omni_refcount = 0
         #: 写序列的锁：写路径与空闲清理都会碰覆盖层，必须串行。
         self._write_lock = threading.Lock()
@@ -193,6 +196,16 @@ class Daemon:
         if self._daemon_lock is not None:
             self._daemon_lock.release()
             self._daemon_lock = None
+        # omni worker 是**子进程**，不会跟着 daemon 消失。它有自己的防孤儿手段
+        # （stdin 一断就退），但那是兜底；正常退出在这里显式停掉它。
+        self._omni_sessions.clear()
+        self.omni_refcount = 0
+        try:
+            from ..desktop import omni as omni_bridge
+
+            omni_bridge.shutdown_worker()
+        except Exception as exc:  # noqa: BLE001 —— 清理路径不该把 daemon 的退出拖住
+            self.log.error("停止 omni worker 异常", detail=f"{type(exc).__name__}: {exc}")
         self.log.info("daemon 退出", uptime_s=round(time.monotonic() - self._booted_at, 1),
                       idle_for_s=round(self.idle_for(), 1))
 
@@ -330,6 +343,9 @@ class Daemon:
         # （架构 §1.5 第 2 条）。
         self.lock.release(session_id)
         result = self.sessions.end(session_id)
+        # 最后一个用过解析的会话结束时把模型卸下（DEC-014）。放在会话真的结束之后：
+        # 卸载要等 worker 收尾，不该让它在「会话已结束但模型还在」的窗口里被打断。
+        self._omni_release(session_id)
         self.touch()
         return result
 
@@ -436,10 +452,20 @@ class Daemon:
             raise CUError(ErrorCode.INVALID_PARAMS, "必须提供 hwnd 或 image 之一")
         session = self.sessions.get(session_id)
         seq = self.sessions.next_seq(session_id)
-        result = self.desktop.parse(
-            hwnd=hwnd, image_path=image_path, ai=bool(params.get("ai")),
-            out_dir=session.directory, seq=seq,
-        )
+        # **先记引用再解析**：worker 是常驻的（DEC-014），若等解析完再记，另一个会话
+        # 并发解析时引用还是 0，第一个会话一结束就会把 worker 从这个会话底下停掉。
+        self._omni_acquire(session_id)
+        try:
+            result = self.desktop.parse(
+                hwnd=hwnd, image_path=image_path, ai=bool(params.get("ai")),
+                out_dir=session.directory, seq=seq,
+            )
+        except Exception:
+            # 失败不留引用：一次都没解析成功的会话没有理由把模型钉在内存里。
+            # （worker 本身不在这里停 —— 失败可能只是「图片路径不存在」，模型还是热的；
+            # 它随引用归零被卸下，见 `_omni_release`。）
+            self._omni_release(session_id)
+            raise
         self.sessions.add_structured(session_id, StructuredRecord(
             seq=seq,
             kind="ai" if params.get("ai") else "base",
@@ -452,6 +478,26 @@ class Daemon:
         payload = result.to_dict()
         payload["seq"] = seq
         return payload
+
+    def _omni_acquire(self, session_id: str) -> None:
+        """记一次 omni 引用。有引用的会话在场时，常驻 worker 不会被停掉。"""
+        self._omni_sessions.add(session_id)
+        self.omni_refcount = len(self._omni_sessions)
+
+    def _omni_release(self, session_id: str) -> None:
+        """放掉一个会话的引用；**归零就停掉常驻 worker**（DEC-014 的卸载时机）。
+
+        这一步是「常驻」与「常占」的分界：没有它会留下一个几 GB 的子进程，
+        一直活到 daemon 退出。
+        """
+        if session_id not in self._omni_sessions:
+            return
+        self._omni_sessions.discard(session_id)
+        self.omni_refcount = len(self._omni_sessions)
+        if not self._omni_sessions:
+            from ..desktop import omni as omni_bridge
+
+            omni_bridge.shutdown_worker()
 
     # ---- lock ----
 

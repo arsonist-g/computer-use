@@ -196,3 +196,84 @@ def test_weight_tasks_are_flat(tmp_path: Path) -> None:
     for task in tasks:
         # 每个目标都恰好两层：models/<子目录>/<文件>。
         assert task["target"].parent.parent == models
+
+
+# --------------------------------------------------------------------------- #
+# 完整性：`config.json` 在场 ≠ 权重齐（2026-09-24 实测的坑）
+# --------------------------------------------------------------------------- #
+
+
+def _lay_down_every_weight(models: Path) -> None:
+    for task in omni_setup._weight_tasks(models):
+        task["target"].parent.mkdir(parents=True, exist_ok=True)
+        task["target"].write_bytes(b"weights")
+
+
+def test_weights_are_not_complete_when_the_big_file_is_missing(tmp_path: Path) -> None:
+    """缺 `model.safetensors` 必须判「没装好」。
+
+    这是首次安装实测到的缺陷：1.08GB 的 `model.safetensors` 传到 28MB 被重置，
+    而 `config.json` 已落盘。旧判据只看 config.json，于是重跑 `setup omni`
+    直接跳过下载、一路报到 `ready: True` —— 真正的模型文件没人检查过。
+    """
+    models = tmp_path / "models"
+    _lay_down_every_weight(models)
+    assert omni_setup._weights_complete(models) is True
+
+    (models / "icon_caption_florence" / "model.safetensors").unlink()
+    assert omni_setup._weights_complete(models) is False
+
+
+def test_weights_are_not_complete_without_the_florence_remote_code(tmp_path: Path) -> None:
+    """远程代码也是「装好」的一部分：缺了就得联网取，离线机器会直接失败。"""
+    models = tmp_path / "models"
+    _lay_down_every_weight(models)
+
+    (models / "icon_caption_florence" / "modeling_florence2.py").unlink()
+    assert omni_setup._weights_complete(models) is False
+
+
+# --------------------------------------------------------------------------- #
+# PyTorch 的来源：有 N 卡才装 CUDA 轮子（2026-09-24 实测的坑）
+# --------------------------------------------------------------------------- #
+
+
+class _ProbeResult:
+    def __init__(self, text: str) -> None:
+        self.stdout = text
+        self.stderr = ""
+        self.returncode = 0
+
+
+def _record_installs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[tuple[str, ...], str | None]]:
+    calls: list[tuple[tuple[str, ...], str | None]] = []
+    monkeypatch.setattr(omni_setup, "_uv_install",
+                        lambda _py, packages, *, index=None: calls.append((packages, index)))
+    return calls
+
+
+def test_an_nvidia_machine_installs_torch_from_the_cuda_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """PyPI 的 Windows 轮子是 CPU 版 —— 有 N 卡就必须去 PyTorch 索引拿 `+cu128`。"""
+    monkeypatch.setattr(omni_setup.shutil, "which", lambda _n: "nvidia-smi")
+    monkeypatch.setattr(omni_setup.subproc, "run",
+                        lambda *a, **k: _ProbeResult("2.11.0+cu128 True\n"))
+    calls = _record_installs(monkeypatch)
+
+    omni_setup._install_torch(tmp_path / "python.exe")
+
+    assert calls == [(omni_setup.CUDA_PACKAGES, omni_setup.TORCH_INDEX_URL)]
+    assert omni_setup.TORCH_INDEX_URL.endswith("/cu128")
+
+
+def test_a_machine_without_an_nvidia_gpu_gets_the_cpu_wheel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """没有 N 卡就下 124MB 的 CPU 轮子，而不是 2.6GB 的 CUDA 轮子。"""
+    monkeypatch.setattr(omni_setup.shutil, "which", lambda _n: None)
+    calls = _record_installs(monkeypatch)
+
+    omni_setup._install_torch(tmp_path / "python.exe")
+
+    assert calls == [(omni_setup.CPU_PACKAGES, None)]

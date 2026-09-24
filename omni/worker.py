@@ -306,6 +306,21 @@ BOX_THRESHOLD = 0.01
 #: 标题模型。florence2 是 V2 的默认，比 blip2 小且在这里够用。
 CAPTION_MODEL = "florence2"
 
+#: easyocr 识别阶段的批大小。上游 `check_ocr_box` 不传这个参数，而 easyocr 的默认值是
+#: **1** —— 每个文本框单独跑一次识别。本机 3440x1440 全屏截图（150 个文本框）实测：
+#: batch_size=1 → 3.4s，32 → 1.3s，两者检出的框与文本逐条一致。
+EASYOCR_BATCH_SIZE = 32
+
+#: Florence-2 单条描述的 token 上限。上游**写死** 20，而批生成要等这一批里最长的那条
+#: 跑完才算完 —— 于是几个啰嗦的框会把整批拖住。实测 94 个图标（3440x1440 全屏）：
+#: 20 → 0.93s，14 → 0.33s，输出 87/94 逐字相同（其余 7 条是长描述被截掉尾部，多为结尾句号）。
+CAPTION_MAX_NEW_TOKENS = 14
+
+#: `get_som_labeled_img` 调 `predict_yolo` 时用的两个阈值。并行预取那份 YOLO 结果时
+#: 必须与它们**逐字一致**，否则拿到的是另一批框、而且没有任何地方会报错。
+#: 这层耦合由 `core/tests/unit/test_omni_upstream_coupling.py` 盯着。
+YOLO_IOU_THRESHOLD = 0.1
+
 _detector_cache: Any = None
 
 
@@ -354,6 +369,10 @@ def _missing_piece() -> str | None:
     caption = _weights_root() / "icon_caption_florence"
     if not (caption / "config.json").is_file():
         return f"缺少描述模型权重（{caption}）"
+    # `config.json` 是这套权重里最小的一件，光看它会把「传到一半断掉」当成装好了
+    # （2026-09-24 实测：1.08GB 的 model.safetensors 没下完，config.json 已落盘）。
+    if not (caption / "model.safetensors").is_file():
+        return f"描述模型权重不完整，缺 model.safetensors（{caption}）"
     return None
 
 
@@ -444,6 +463,155 @@ def _stub_unused_paddle() -> None:
     sys.modules["paddleocr"] = module
 
 
+def _tune_easyocr_batch() -> None:
+    """给上游的 easyocr 调用补上 `batch_size`（默认 1 太慢，见 `EASYOCR_BATCH_SIZE`）。
+
+    **必须在 `util.omniparser` 被 import 之前调用。** 那个模块用
+    `from util.utils import check_ocr_box` 把函数**按值**绑进自己的命名空间，
+    之后再改 `util.utils.check_ocr_box` 对它无效 —— 这是本节最容易踩空的地方，
+    顺序错了不会报错，只会静默地退回 batch_size=1。
+
+    做法与 `_stub_unused_paddle` 同源：**依赖注入而非打补丁**。不改上游源码
+    （那是 `setup omni` 克隆下来的，改了就与上游脱钩），只替换那一个要调的入口。
+    """
+    try:
+        from util import utils as upstream
+    except ImportError:
+        return
+
+    original = upstream.check_ocr_box
+
+    def check_ocr_box(image_source: Any, *args: Any, **kwargs: Any) -> Any:
+        easyocr_args = kwargs.get("easyocr_args")
+        merged = dict(easyocr_args) if isinstance(easyocr_args, dict) else {}
+        # 调用方显式给的 batch_size 优先 —— 这层只补默认值，不改别人的选择。
+        merged.setdefault("batch_size", EASYOCR_BATCH_SIZE)
+        kwargs["easyocr_args"] = merged
+        return original(image_source, *args, **kwargs)
+
+    upstream.check_ocr_box = check_ocr_box  # type: ignore[assignment]
+
+
+def _skip_unused_annotation() -> None:
+    """把「画标注框 + 编码 PNG + base64」换成一次几乎不花时间的占位。
+
+    那张画好框的图**产品侧从来不用**：我们只取结构化数据，AI 看的是原始截图。
+    而上游 `get_som_labeled_img` 无条件画框、PNG 编码、base64 编码一张 3440x1440 的图
+    —— 实测 0.38s，纯白花（换成空图后 0.02s）。
+
+    做法与 `_stub_unused_paddle` 同源：**依赖注入而非打补丁**。不改上游源码，
+    只把一个用不到的渲染器换成返回空图的替身；上游的编排（过滤、合并、描述、
+    坐标换算）一个字都没动，只有那张没人看的图变成了黑的。
+
+    返回空 dict 而不是假的坐标：`label_coordinates` 我们同样不用（元素坐标来自
+    `filtered_boxes_elem`），编一份假的反而是多余的谎。
+    """
+    from util import utils as upstream
+
+    def annotate(image_source: Any, boxes: Any, logits: Any, phrases: Any,
+                 **kwargs: Any) -> Any:
+        import numpy as np
+
+        height, width = image_source.shape[:2]
+        # 尺寸必须与真实图像一致：上游在 `output_coord_in_ratio` 分支里有 assert 校验它。
+        return np.zeros((height, width, 3), dtype=np.uint8), {}
+
+    upstream.annotate = annotate  # type: ignore[assignment]
+
+
+def _cap_caption_length(detector: Any) -> None:
+    """给 Florence-2 的生成补一个 `max_new_tokens` 上限（见 `CAPTION_MAX_NEW_TOKENS`）。
+
+    包 `generate` 而不是包上游的取描述函数：`max_new_tokens=20` 是在
+    `get_parsed_content_icon` 里**写在调用处**的，而包住 `generate` 只动这一个数，
+    其余参数（输入、beam、采样策略）原样透传。
+    """
+    model = detector.caption_model_processor.get("model")
+    if model is None:
+        return
+    original = model.generate
+
+    def generate(*args: Any, **kwargs: Any) -> Any:
+        limit = kwargs.get("max_new_tokens")
+        if isinstance(limit, int) and limit > CAPTION_MAX_NEW_TOKENS:
+            kwargs["max_new_tokens"] = CAPTION_MAX_NEW_TOKENS
+        return original(*args, **kwargs)
+
+    model.generate = generate  # type: ignore[assignment]
+
+
+def _overlap_ocr_and_yolo(detector: Any) -> None:
+    """让 OCR 与 YOLO **同时**跑（两者互不依赖，串行却要 1.7s，并行实测 0.75s）。
+
+    为什么不去重写编排：`Omniparser.parse` 的顺序是「OCR → get_som_labeled_img
+    （内部先 YOLO 再描述）」，而描述那一步**需要 OCR 的结果**做过滤与排序。
+    所以能并行的只有最前面这两段，而它们恰好在两个不同的模块全局名下被调用：
+
+    - `util.omniparser.check_ocr_box` —— OCR 入口（`_tune_easyocr_batch` 已经包过一层）
+    - `util.utils.predict_yolo`       —— YOLO 入口（`get_som_labeled_img` 里调用）
+
+    于是：OCR 丢到后台线程，前台把 YOLO 先算完存进 `pending`；稍后
+    `get_som_labeled_img` 来调 `predict_yolo` 时，直接把这份结果还给它。
+    上游的编排一行不改，只有「谁先跑」变了。
+
+    `pending` 只留一个槽位、且每次 `check_ocr_box` 都是**覆盖**而不是追加：
+    worker 的请求循环是串行的，不会有两次解析交叠；万一 `predict_yolo` 没被调到，
+    残留的那份也会在下一次解析开始时被覆盖掉，不会被错用。
+    """
+    from util import omniparser as upstream_parser
+    from util import utils as upstream
+
+    original_check = upstream_parser.check_ocr_box
+    original_predict = upstream.predict_yolo
+    pending: list[Any] = []
+
+    def check_ocr_box(image_source: Any, *args: Any, **kwargs: Any) -> Any:
+        import threading
+
+        slot: dict = {}
+        # `Image.open(...)` 交回来的对象是**懒加载**的：谁先 `.load()` 谁读那个流。
+        # 两个线程各自去读同一个流会把它读坏（实测报 `OSError: broken data stream`）。
+        # 所以先把像素读进内存，再各拿一份独立的图，之后两边都只读不碰文件。
+        if hasattr(image_source, "load"):
+            image_source.load()
+        ocr_source = image_source.copy() if hasattr(image_source, "copy") else image_source
+
+        def run_ocr() -> None:
+            try:
+                slot["value"] = original_check(ocr_source, *args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 —— 后台线程里必须接住再回主线程抛
+                slot["error"] = exc
+
+        thread = threading.Thread(target=run_ocr, name="cu-omni-ocr", daemon=True)
+        thread.start()
+        # 前台算 YOLO。阈值必须与 `get_som_labeled_img` 传给 `predict_yolo` 的一致。
+        try:
+            result = detector.som_model.predict(source=image_source,
+                                                conf=BOX_THRESHOLD, iou=YOLO_IOU_THRESHOLD)
+        except Exception:
+            # 前台先炸：也要把后台那条收干净再抛，否则 OCR 线程会一次次攒在进程里。
+            thread.join()
+            raise
+        pending[:] = [result]
+        thread.join()
+        if "error" in slot:
+            raise slot["error"]
+        return slot["value"]
+
+    def predict_yolo(model: Any, image: Any, box_threshold: float, imgsz: Any, scale_img: bool,
+                     iou_threshold: float = 0.7) -> Any:
+        if pending and not scale_img:
+            result = pending.pop()
+            boxes = result[0].boxes.xyxy
+            conf = result[0].boxes.conf
+            return boxes, conf, [str(i) for i in range(len(boxes))]
+        return original_predict(model=model, image=image, box_threshold=box_threshold,
+                                imgsz=imgsz, scale_img=scale_img, iou_threshold=iou_threshold)
+
+    upstream_parser.check_ocr_box = check_ocr_box  # type: ignore[assignment]
+    upstream.predict_yolo = predict_yolo  # type: ignore[assignment]
+
+
 def _load_detector():
     """构造 OmniParser。未安装时**显式报错**，不静默降级（DEC-002）。
 
@@ -470,7 +638,8 @@ def _load_detector():
     if root not in sys.path:
         sys.path.insert(0, root)
 
-    _stub_unused_paddle()               # 必须在 import util.omniparser 之前
+    _stub_unused_paddle()               # 必须在 import util.utils 之前
+    _tune_easyocr_batch()               # 必须在 import util.omniparser 之前（按值绑定）
     _allow_optional_remote_imports()    # 必须在 Florence-2 模型加载之前
 
     try:
@@ -488,6 +657,11 @@ def _load_detector():
         "caption_model_path": str(_weights_root() / "icon_caption_florence"),
         "BOX_TRESHOLD": BOX_THRESHOLD,
     })
+    # 下面三步都必须在**第一次 parse 之前**装好；它们只改「用哪份结果 / 跑多长」，
+    # 不改上游的编排。顺序无关，但都放在这里，让「装了什么」集中在一处可查。
+    _skip_unused_annotation()
+    _cap_caption_length(detector)
+    _overlap_ocr_and_yolo(detector)
     _detector_cache = detector
     return detector
 

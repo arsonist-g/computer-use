@@ -79,6 +79,9 @@ def shell(tmp_path: Path, *, desktop: FakeDesktop | None = None) -> Daemon:
     daemon.desktop = desktop or FakeDesktop()
     daemon.controller = FakeController()
     daemon._write_lock = threading.Lock()
+    #: omni 引用计数（DEC-014）——`Daemon.__init__` 里装的，这里补上同样两个成员。
+    daemon._omni_sessions = set()
+    daemon.omni_refcount = 0
     daemon._stop = threading.Event()
     daemon._stop_event = daemon._stop
     return daemon

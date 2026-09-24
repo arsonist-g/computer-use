@@ -76,7 +76,10 @@ def test_the_unavailable_path_fails_before_any_worker_is_launched(
         launched.append((args, kwargs))
         raise AssertionError("环境不可用这条路径不该拉起任何子进程")
 
+    # `run` 与 `Popen` 都要盯：parse 这条路现在走**常驻** worker（`Popen`），
+    # 只挡住 `run` 的话这条守卫就变成了空转 —— 它会通过，却什么都没守住。
     monkeypatch.setattr(omni.subproc, "run", _forbidden)
+    monkeypatch.setattr(omni.subproc, "Popen", _forbidden)
 
     with pytest.raises(CUError) as info:
         omni.call_parse(image_path=str(tmp_path / "shot.png"), out_dir=tmp_path,

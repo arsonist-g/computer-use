@@ -18,6 +18,7 @@
     "!core/src/**/__pycache__",
     "core/pyproject.toml",
     "core/README.md",
+    "omni/worker.py",
     "skill/"
   ],
   "engines": {

@@ -120,6 +120,8 @@ def main() -> int:
         pyc = [name for name in names if name.endswith(".pyc") or "__pycache__" in name]
         py_files = [name for name in names if name.endswith(".py")]
         wanted = ["bin/computer-use.mjs", "core/pyproject.toml", "package.json",
+                  # `parse` 的 worker 脚本：少了它，装出来的包里整个解析功能不可用
+                  "omni/worker.py",
                   "skill/computer-use/SKILL.md", "skill/computer-use/references/errors.md",
                   "skill/computer-use/references/install-and-config.md"]
         missing = [name for name in wanted if name not in names]
