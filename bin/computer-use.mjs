@@ -395,7 +395,14 @@ function main() {
     // `windowsHide: true` 是本轮发布阻塞项的直接修复：少了它，**每次** CLI 调用
     // 都会弹一个 python 控制台黑窗（用户报告的就是这个）。stdio 走 inherit 不影响 ——
     // 隐藏窗口靠的是创建标志 CREATE_NO_WINDOW，不是流。
-    { stdio: "inherit", shell: false, windowsHide: true },
+    // `PYTHONSAFEPATH=1`（Python 3.11+，等价于 `python -P`）：`python -m` 默认把**当前目录**
+    // 排在 sys.path 最前，调用方若在 cwd 里留了与标准库同名的脚本（如 `inspect.py`），
+    // CLI 会在 import 阶段就被自己的脚本顶掉而崩溃 —— 而 Agent 侧的约定正是「临时脚本都放
+    // 当前工作目录」，所以脚本名撞上任何标准库模块名都会复现（2026-09-25 真实事故）。
+    // 用环境变量而不是 `-P` 参数：daemon 由客户端以 `-m cu.daemon` 拉起，环境变量随
+    // os.environ 一起传下去，客户端与 daemon 一并受保护（见 DEC-092）。
+    { stdio: "inherit", shell: false, windowsHide: true,
+      env: { ...process.env, PYTHONSAFEPATH: "1" } },
   );
   if (child.error) {
     process.stderr.write(`computer-use: 启动 Python 客户端失败: ${child.error.message}\n`);
