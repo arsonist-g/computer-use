@@ -69,7 +69,7 @@ Every command accepts every argument below. The `Where` column says where each o
 |---|---|---|
 | `--session <id>` | required by `screenshot`, `parse`, `session end`, and all six writes | Session id, also read from `COMPUTER_USE_SESSION`. |
 | `--describe "<text>"` | required by all six writes | What this operation does and why. |
-| `--hwnd <h>` | `screenshot`, `parse`, and every write except `scroll` | Target window: checked against your session's most recent screenshot of it (`window_stale` if the system recycled the handle), and brought to the foreground for `click`, `drag`, `type`, and `key`. |
+| `--hwnd <h>` | `screenshot`, `parse`, and every write except `scroll` | Target window: checked against your session's most recent screenshot of it (`window_stale` if the system recycled the handle), and brought to the foreground for `click`, `drag`, `type`, and `key`. A modal popup wins focus. |
 | `--json` | everywhere | Machine-readable output on stdout. |
 | `--inline` | `screenshot`, `parse` | Return the image or data as base64 instead of a path. |
 | `--verbose` | everywhere | Lower-level detail, such as which capture layer served the request. |
@@ -104,7 +104,7 @@ A row lists the parameters that belong to that command, and the shared ones are 
 | Command | Description | Parameters | Notes |
 |---|---|---|---|
 | `windows` | Lists top-level windows, front to back | `--all` | `--all`: include invisible and untitled windows. `--verbose` adds `class`, `is_topmost`, `zorder`. Fields: `hwnd`, `title`, `pid`, `process`, `rect` (`x,y,w,h`), `monitor`, `is_foreground`, `is_minimized`, `elevated`. |
-| `screenshot` | Captures a window or a display | `--hwnd \| --full` `--monitor` `--format` `--cursor` | `--monitor` is 0-based, defaults to the primary display, and needs `--full`; `--format` is `png` or `webp`. Returns the image path, its dimensions, its `origin`, the capture `layer`, and the cursor's screen position (`cursor_inside` says whether it falls in the image). `--cursor` additionally paints a cursor-sized box over it and reports `cursor_marker`; a cursor outside the image is never painted. |
+| `screenshot` | Captures a window or a display | `--hwnd \| --full` `--monitor` `--format` `--cursor` | `--monitor` is 0-based, defaults to the primary display, and needs `--full`; `--format` is `png` or `webp`. An owned modal popup is included in the crop. Returns the image path, its dimensions, its `origin`, the capture `layer`, and the cursor's screen position (`cursor_inside` says whether it falls in the image). `--cursor` additionally paints a cursor-sized box over it and reports `cursor_marker`; a cursor outside the image is never painted. |
 | `parse` | Detects elements in an image and writes markdown beside it | `--hwnd \| --image` `--ai` | The markdown holds `type`, `bbox`, `interactivity`, and `content` per element. Returns the path and a count; without the detector, `omni_not_installed`. |
 
 ### Writes
@@ -132,7 +132,7 @@ A write returns timing (`moved_ms`, `total_ms`) and may carry a `warning`: re-ch
 ## Reading the screen
 
 - Read `elevated` before you plan a click: the OS blocks input to an elevated window, so route around it or ask the user to do that step.
-- Prefer the returned image path over `--inline`, because a full-screen PNG is megabytes, and trust the returned `origin`, `width`, and `height`: when the first capture layer fails the fallback stores the whole monitor, so a window screenshot can be larger than the window.
+- Prefer the returned image path over `--inline`, because a full-screen PNG is megabytes, and trust the returned `origin`, `width`, and `height`.
 - A `parse` `bbox` is in image pixels, so the same origin arithmetic applies. Read the markdown only when you need the elements.
 
 ## Screen coordinates

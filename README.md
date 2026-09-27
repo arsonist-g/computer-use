@@ -46,6 +46,8 @@ screen_y = origin_y + image_y
 
 Never pass an image coordinate to a write command without adding `origin` first. `--hwnd` does not change the meaning of coordinates.
 
+When a target window is disabled by an enabled owned modal popup, `windows` also lists the popup, `screenshot --hwnd <owner>` returns the composed monitor crop covering both, and write commands with that owner retarget foreground and focus to the popup. `origin` remains the union top-left.
+
 ## Commands
 
 | Group | Commands |
@@ -61,7 +63,7 @@ Arguments are positional and flags start with `--`. `computer-use --help` lists 
 |---|---|---|
 | `--session <id>` | `screenshot`, `parse`, `session end`, every write | Session id; also read from `COMPUTER_USE_SESSION`. |
 | `--describe "<text>"` | every write | What the operation does and why. A write without it fails before anything reaches the desktop. |
-| `--hwnd <h>` | `screenshot`, `parse`, every write but `scroll` | Target window, brought to the foreground for `click`, `drag`, `type`, and `key`. |
+| `--hwnd <h>` | `screenshot`, `parse`, every write but `scroll` | Target window, brought to the foreground for `click`, `drag`, `type`, and `key`; an active owned modal popup becomes the foreground and focus target. |
 | `--json` | everywhere | Machine-readable envelope on stdout. |
 | `--continue` / `--end` | writes | Another command follows, or this was the last one. |
 | `--verbose` | everywhere | Lower-level detail, such as which capture layer served the request. |

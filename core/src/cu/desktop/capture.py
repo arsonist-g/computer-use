@@ -249,7 +249,8 @@ def _capture_wgc_window(hwnd: int, path: Path,
 
 
 def _capture_wgc_monitor(monitor_index: int, path: Path,
-                         mark: _CursorMark | None = None) -> tuple[int, int]:
+                         mark: _CursorMark | None = None,
+                         crop: tuple[int, int, int, int] | None = None) -> tuple[int, int]:
     from windows_capture import WindowsCapture
 
     capture = WindowsCapture(monitor_index=_wc_monitor_index(monitor_index),
@@ -270,10 +271,11 @@ def _capture_wgc_monitor(monitor_index: int, path: Path,
                 done.set()
             return
         try:
+            target = frame if crop is None else frame.crop(*crop)
             if mark is not None:
-                mark.result = _mark_cursor(frame, mark.origin, mark.size)
-            _save(frame, path)
-            captured["size"] = (frame.width, frame.height)
+                mark.result = _mark_cursor(target, mark.origin, mark.size)
+            _save(target, path)
+            captured["size"] = (target.width, target.height)
         except BaseException as exc:  # noqa: BLE001
             failures.append(exc)
         finally:
@@ -306,12 +308,12 @@ def _capture_wgc_monitor(monitor_index: int, path: Path,
 
 def _capture_dxgi(monitor_index: int, crop: tuple[int, int, int, int] | None,
                   path: Path, mark: _CursorMark | None = None) -> tuple[int, int]:
-    """DXGI 取帧。`crop` 非空时裁出窗口区域（窗口截图走这条）。
+    """DXGI 取帧。`crop` 是显示器本地像素坐标；非空时只保存裁剪区域。
 
     spike 陷阱 4：新建会话后立刻取帧可能是整帧全黑，必须**丢弃黑帧并循环重试**，
     必要时重建会话。
     """
-    from windows_capture import DxgiDuplicationSession
+    from windows_capture import DxgiDuplicationSession, cv2
 
     session = DxgiDuplicationSession(monitor_index=_wc_monitor_index(monitor_index))
     deadline = time.monotonic() + LAYER_TIMEOUT_SECONDS
@@ -334,16 +336,25 @@ def _capture_dxgi(monitor_index: int, crop: tuple[int, int, int, int] | None,
                 raise CaptureLayerError("DXGI 持续返回全黑帧")
             continue
         try:
-            if mark is not None:
-                mark.result = _mark_cursor(frame, mark.origin, mark.size)
-            _save(frame, path)
+            if crop is None:
+                if mark is not None:
+                    mark.result = _mark_cursor(frame, mark.origin, mark.size)
+                _save(frame, path)
+                size = (frame.width, frame.height)
+            else:
+                # DxgiDuplicationFrame 没有 WGC Frame.crop()（spike 陷阱 3）；
+                # `to_bgr()` 是唯一带色彩转换的完整帧入口，切片后交给 cv2 落盘。
+                x0, y0, x1, y1 = crop
+                pixels = frame.to_bgr()[y0:y1, x0:x1]
+                if not cv2.imwrite(str(path), pixels):
+                    raise CaptureLayerError(f"DXGI 裁剪保存失败：{path.name}")
+                size = (x1 - x0, y1 - y0)
+        except CaptureLayerError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise CaptureLayerError(f"DXGI 保存失败：{exc}") from exc
         _await_file(path)
-        # 注：DXGI frame 没有 crop()（spike 陷阱 3：WGC Frame 与 DXGI frame 不是同一类型），
-        # 因此窗口截图的这一层存的是**整个显示器**。坐标换算仍以 origin 为准 ——
-        # 这也是为什么 WGC 是主路径，DXGI 只作为兜底。
-        return (frame.width, frame.height)
+        return size
 
     raise CaptureLayerError(f"DXGI 在 {LAYER_TIMEOUT_SECONDS}s 内未取得可用帧")
 
@@ -353,36 +364,119 @@ def _capture_dxgi(monitor_index: int, crop: tuple[int, int, int, int] | None,
 # ---------------------------------------------------------------------------
 
 
+def _union_bounds(rects: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int] | None:
+    if not rects:
+        return None
+    return (min(r[0] for r in rects), min(r[1] for r in rects),
+            max(r[2] for r in rects), max(r[3] for r in rects))
+
+
+def _intersect_bounds(a: tuple[int, int, int, int],
+                      b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[2], b[2]), min(a[3], b[3])
+    return (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else None
+
+
+def _modal_capture_geometry(stack: list[int], monitors: list) -> tuple[int, tuple[int, int, int, int],
+                                                                     tuple[int, int, int, int] | None]:
+    """模态栈在 popup 所在显示器上的并集、origin 与显示器本地 crop。
+
+    跨屏模态链不做多显示器拼接：以模态链末端的显示器为观察面，其他屏上的部分裁掉。
+    """
+    from .windows import monitor_index_for
+
+    if not monitors:
+        raise CaptureLayerError("没有可用显示器")
+    monitor_index = monitor_index_for(stack[-1], monitors)
+    monitor = next((m for m in monitors if m.index == monitor_index), monitors[0])
+    monitor_rect = tuple(monitor.rect)
+    visible: list[tuple[int, int, int, int]] = []
+    for surface in stack:
+        bounds = w.extended_frame_bounds(surface) or w.window_rect(surface)
+        if bounds is None:
+            continue
+        clipped = _intersect_bounds(bounds, monitor_rect)
+        if clipped is not None:
+            visible.append(clipped)
+    union = _union_bounds(visible)
+    if union is None:
+        raise CaptureLayerError("模态窗口没有可截取的可视区域")
+    crop = (union[0] - monitor_rect[0], union[1] - monitor_rect[1],
+            union[2] - monitor_rect[0], union[3] - monitor_rect[1])
+    return monitor_index, union, crop
+
+
 def capture_window(hwnd: int, out_dir: Path, seq: int, window: WindowInfo,
                    image_format: str = "png",
                    draw_cursor: bool = False) -> CaptureResult:
     """按 hwnd 截图，走降级链。
 
     `origin` 取 **DWM 扩展框**（`extended_frame_bounds`）的左上角，不是 `GetWindowRect`。
+    若目标是当前模态 popup 锁住的 owner，则截图面是 owner + popup 的并集（DEC-093）。
 
     为什么：`GetWindowRect` 含 Win10/11 那条**不可见的调整边框**（本机 125% 缩放下
     左右各 7px），而 WGC 交付的图像只覆盖可见框 —— 实测同一时刻
     `GetWindowRect` 是 900x560、图像是 886x553，两者恰好差 14x7。若拿
-    `GetWindowRect` 当原点，`screen = origin + 图像坐标` 就会横向偏 7px，
+    `GetWindowRect` 当 origin，`screen = origin + 图像坐标` 就会横向偏 7px，
     违反 CONSTRAINT-003（截图像素坐标系与 click 坐标系必须同源）。
     （曾经的注释写着「图像 (0,0) 精确对应 GetWindowRect」—— 那是错的，见这条实测。）
     """
     from ..ids import format_hwnd
+    from .windows import display_context, modal_window_stack
 
     rect = w.window_rect(hwnd)
     if rect is None:
         raise CUError(ErrorCode.WINDOW_NOT_FOUND,
                       f"窗口不存在：{format_hwnd(hwnd)}", {"hwnd": format_hwnd(hwnd)})
-    # 扩展框取不到时（DWM 关闭、窗口尚未合成）退回 GetWindowRect —— 那是次优解，
-    # 但比拒绝截图好，且此时两者的差通常也为 0。
+
+    stack = modal_window_stack(hwnd)
+    failures: list[str] = []
+
+    if len(stack) > 1:
+        try:
+            monitors = display_context().monitors
+            monitor_index, region, crop = _modal_capture_geometry(stack, monitors)
+        except Exception as exc:  # noqa: BLE001
+            raise CUError(ErrorCode.CAPTURE_FAILED,
+                          f"模态窗口截图范围不可用：{exc}",
+                          {"hwnd": format_hwnd(hwnd),
+                           "modal_windows": [format_hwnd(item) for item in stack]}) from exc
+
+        origin = (region[0], region[1])
+        name = artifact_name("win", seq, hwnd=format_hwnd(hwnd), title=window.title,
+                             origin=origin, ext=image_format)
+        path = out_dir / name
+        mark = _CursorMark(origin=origin, size=w.cursor_size()) if draw_cursor else None
+        try:
+            width, height = _capture_wgc_monitor(monitor_index, path, mark, crop)
+            return _finish(CaptureResult(path=str(path), origin=origin, width=width, height=height,
+                                         layer="wgc", kind="window", window=window), mark)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"WGC: {exc}")
+
+        try:
+            width, height = _capture_dxgi(monitor_index, crop, path)
+            return _finish(CaptureResult(path=str(path), origin=origin, width=width, height=height,
+                                         layer="dxgi", kind="window", window=window),
+                           mark, marker="unsupported")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"DXGI: {exc}")
+
+        raise CUError(
+            ErrorCode.CAPTURE_FAILED,
+            f"模态窗口截图降级链全部失败：{'；'.join(failures)}",
+            {"hwnd": format_hwnd(hwnd), "attempts": failures,
+             "modal_windows": [format_hwnd(item) for item in stack]},
+        )
+
+    # 单窗路径：扩展框取不到时（DWM 关闭、窗口尚未合成）退回 GetWindowRect ——
+    # 那是次优解，但比拒绝截图好，且此时两者的差通常也为 0。
     frame = w.extended_frame_bounds(hwnd) or rect
-    left, top = frame[0], frame[1]
-    origin = (left, top)
+    origin = (frame[0], frame[1])
     name = artifact_name("win", seq, hwnd=format_hwnd(hwnd), title=window.title,
                          origin=origin, ext=image_format)
     path = out_dir / name
-
-    failures: list[str] = []
     mark = _CursorMark(origin=origin, size=w.cursor_size()) if draw_cursor else None
     try:
         width, height = _capture_wgc_window(hwnd, path, mark)
@@ -392,10 +486,15 @@ def capture_window(hwnd: int, out_dir: Path, seq: int, window: WindowInfo,
         failures.append(f"WGC: {exc}")
 
     try:
-        # DXGI 这一层存的是**整个显示器**（它没有 crop），图像原点不是窗口原点 ——
-        # 拿窗口原点去画红框会画到别的地方，所以这一层不画（记 `unsupported`），
-        # 但光标坐标与「在不在图内」照报。
-        width, height = _capture_dxgi(window.monitor, rect, path)
+        # DXGI 没有 WGC Frame.crop()，这里按 DWM 扩展框裁出显示器本地像素。
+        # 裁剪后 origin 与图像像素仍同源；红框在裁剪缓冲上走不支持分支。
+        monitors = display_context().monitors
+        monitor = next((m for m in monitors if m.index == window.monitor), monitors[0])
+        monitor_rect = tuple(monitor.rect)
+        visible = _intersect_bounds(frame, monitor_rect) or frame
+        crop = (visible[0] - monitor_rect[0], visible[1] - monitor_rect[1],
+                visible[2] - monitor_rect[0], visible[3] - monitor_rect[1])
+        width, height = _capture_dxgi(window.monitor, crop, path)
         return _finish(CaptureResult(path=str(path), origin=origin, width=width, height=height,
                                      layer="dxgi", kind="window", window=window),
                        mark, marker="unsupported")

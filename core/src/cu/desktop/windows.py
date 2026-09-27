@@ -94,9 +94,32 @@ def _probe_elevated(pid: int) -> bool:
         w.kernel32.CloseHandle(handle)
 
 
+def _window_enabled(hwnd: int) -> bool:
+    """查询窗口启用态；替身不声明该能力时按启用处理（旧单窗行为）。"""
+    checker = getattr(w, "is_window_enabled", None)
+    if checker is not None:
+        return bool(checker(hwnd))
+    checker = getattr(w.user32, "IsWindowEnabled", None)
+    return bool(checker(hwnd)) if checker is not None else True
+
+
+def _is_active_modal_popup(hwnd: int, owner: int) -> bool:
+    """`hwnd` 是否是当前锁住 `owner` 的那个模态 popup。
+
+    仅凭「有 owner」不能收下：普通附属窗也会被 EnumWindows 枚举。收下条件是 Windows
+    已经明确把 `owner` 禁用，且 `GW_ENABLEDPOPUP` 指向这个 HWND。
+    """
+    if not owner or _window_enabled(owner):
+        return False
+    popup = int(w.user32.GetWindow(owner, w.GW_ENABLEDPOPUP) or 0)
+    return bool(_window_enabled(hwnd) and popup == int(hwnd))
+
+
 def _is_top_level(hwnd: int) -> bool:
     """默认过滤：可见、有标题、非工具窗、未被 DWM 隐藏。
 
+    模态对话框是例外：它是 owned 窗口，同时又是当前唯一能接收输入的那个窗口，
+    必须进入默认枚举；普通 owned 附属窗仍按原规则滤掉。
     刻意**不**判断「是否被遮挡」——「置顶」与「被遮挡」是两个概念，
     把后者当过滤条件会把大量正常窗口滤掉（DEC-021 修正了 sketch 的这处概念混用）。
     """
@@ -104,19 +127,38 @@ def _is_top_level(hwnd: int) -> bool:
         return False
     if w.is_cloaked(hwnd):
         return False
-    owner = w.user32.GetWindow(hwnd, w.GW_OWNER)
+    owner = int(w.user32.GetWindow(hwnd, w.GW_OWNER) or 0)
     ex_style = w.window_ex_style(hwnd)
     if owner and not (ex_style & w.WS_EX_APPWINDOW):
-        return False            # 有主窗口的附属窗，不是独立应用
+        if not _is_active_modal_popup(hwnd, owner):
+            return False        # 普通附属窗，不是独立应用
     if ex_style & w.WS_EX_TOOLWINDOW and not (ex_style & w.WS_EX_APPWINDOW):
-        return False
-    style = w.window_style(hwnd)
-    if style & w.WS_EX_TOOLWINDOW:
         return False
     return True
 
 
-def _monitor_index_for(hwnd: int, monitors: list[MonitorInfo]) -> int:
+def modal_window_stack(hwnd: int) -> list[int]:
+    """返回当前模态链，`[owner, popup, ...]`；没有模态子窗时只含 `hwnd`。
+
+    只沿 Windows 自己给出的 `GW_ENABLEDPOPUP` 走。这样不会把普通 owned 浮窗误当成交互面，
+    也能覆盖 popup 自己又被下一层模态窗锁住的情况。
+    """
+    stack = [int(hwnd)]
+    seen = {int(hwnd)}
+    current = int(hwnd)
+    while not _window_enabled(current):
+        popup = int(w.user32.GetWindow(current, w.GW_ENABLEDPOPUP) or 0)
+        if not popup or popup == current or popup in seen:
+            break
+        if not w.user32.IsWindowVisible(popup) or w.is_cloaked(popup):
+            break
+        stack.append(popup)
+        seen.add(popup)
+        current = popup
+    return stack
+
+
+def monitor_index_for(hwnd: int, monitors: list[MonitorInfo]) -> int:
     handle = w.user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
     info = w.MONITORINFOEXW()
     info.cbSize = ctypes.sizeof(w.MONITORINFOEXW)
@@ -159,7 +201,7 @@ def enumerate_windows(monitors: list[MonitorInfo],
             pid=pid.value,
             process=process_name(pid.value),
             rect=(x, y, right - x, bottom - y),
-            monitor=_monitor_index_for(hwnd, monitors),
+            monitor=monitor_index_for(hwnd, monitors),
             is_foreground=(int(hwnd) == foreground),
             is_minimized=bool(w.user32.IsIconic(hwnd)),
             elevated=is_elevated(pid.value),
@@ -379,7 +421,12 @@ def bring_to_foreground(hwnd: int) -> None:
 
     可以这样强抢的前提是写序列期间物理输入已被钩子吞掉（DEC-030）：焦点被拿走时，
     用户此刻的按键不会落进目标窗口。
+
+    若目标被当前启用的模态 owned popup 锁住（DEC-093），实际能接输入的是 popup 而不是 owner：
+    这里沿 `GW_ENABLEDPOPUP` 把 `hwnd` 换成模态链末端，再走同一套前台与焦点逻辑。
     """
+    requested = int(hwnd)
+    hwnd = modal_window_stack(requested)[-1]
     if w.foreground_hwnd() == hwnd:
         _give_focus(hwnd)
         return
@@ -404,9 +451,12 @@ def bring_to_foreground(hwnd: int) -> None:
     if w.foreground_hwnd() != hwnd:
         from ..ids import format_hwnd
 
+        detail = {"hwnd": format_hwnd(requested)}
+        if hwnd != requested:
+            detail["modal_popup"] = format_hwnd(hwnd)
         raise CUError(ErrorCode.FOREGROUND_FAILED,
                       f"无法把窗口提到前台：{format_hwnd(hwnd)}",
-                      {"hwnd": format_hwnd(hwnd)})
+                      detail)
     _give_focus(hwnd)
 
 

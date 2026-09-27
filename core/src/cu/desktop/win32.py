@@ -27,6 +27,7 @@ dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
 # ---------------------------------------------------------------------------
 
 GW_OWNER = 4
+GW_ENABLEDPOPUP = 6
 GWL_STYLE = -16
 GWL_EXSTYLE = -20
 
@@ -260,6 +261,8 @@ user32.IsWindow.restype = wintypes.BOOL
 user32.IsWindow.argtypes = [wintypes.HWND]
 user32.IsWindowVisible.restype = wintypes.BOOL
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.IsWindowEnabled.restype = wintypes.BOOL
+user32.IsWindowEnabled.argtypes = [wintypes.HWND]
 user32.IsIconic.restype = wintypes.BOOL
 user32.IsIconic.argtypes = [wintypes.HWND]
 user32.IsZoomed.restype = wintypes.BOOL
@@ -477,6 +480,11 @@ def is_cloaked(hwnd: int) -> bool:
     result = dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(value),
                                           ctypes.sizeof(value))
     return result == 0 and value.value != 0
+
+
+def is_window_enabled(hwnd: int) -> bool:
+    """窗口本身是否接受输入（模态对话框会把 owner 置为 false）。"""
+    return bool(user32.IsWindowEnabled(hwnd))
 
 
 def foreground_hwnd() -> int:
