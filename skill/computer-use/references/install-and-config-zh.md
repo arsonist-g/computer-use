@@ -22,11 +22,11 @@ computer-use lock status
 这个包可以把本 skill 拷进本机各 agent 家族的技能目录：
 
 ```
-computer-use skill install       # 把 SKILL.md 与 references/ 写到 ~/.claude、~/.codex、~/.agents
+computer-use skill install       # 把 SKILL.md 与 references/ 写到已存在的 ~/.claude、Codex 专用 ~/.codex 与共享根 ~/.agents
 computer-use skill uninstall
 ```
 
-只有家族的根目录已存在才装进去，不给没装的 agent 凭空造目录；一个家族都没探测到时退回 Claude Code 的路径。用 `COMPUTER_USE_SKILL_DIR` 可以只装到指定的那一个目录。`computer-use --launcher-help` 列出启动器自己处理的命令，那也是它唯一自己处理的那些；其余命令都交给 Python 客户端。只装英文正式版；`*-zh.md` 校对译本留在包里不装。
+只有家族的根目录已存在才装进去，不给没装的 agent 凭空造目录；一个家族都没探测到时退回 Claude Code 的路径。Codex 会收到专用 `~/.codex/skills/` 里的 skill，这个目录在 Codex 通过 WSL 运行时也能被正常映射；`~/.agents/skills/` 继续作为跨 agent 共享根。用 `COMPUTER_USE_SKILL_DIR` 可以只装到指定的那一个目录。`computer-use --launcher-help` 列出启动器自己处理的命令，那也是它唯一自己处理的那些；其余命令都交给 Python 客户端。只装英文正式版；`*-zh.md` 校对译本留在包里不装。
 
 ## 本机命令
 

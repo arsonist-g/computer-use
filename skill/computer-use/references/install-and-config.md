@@ -22,11 +22,11 @@ computer-use lock status
 The package can copy this skill into the skill directory of every agent family present on this machine:
 
 ```
-computer-use skill install       # writes SKILL.md and references/ to ~/.claude, ~/.codex, ~/.agents
+computer-use skill install       # writes SKILL.md and references/ to existing ~/.claude, Codex ~/.codex, and shared ~/.agents roots
 computer-use skill uninstall
 ```
 
-An agent family is targeted only when its root directory already exists, so nothing is created for an agent that is not installed; when no family is found, the install falls back to the Claude Code path. Set `COMPUTER_USE_SKILL_DIR` to install into exactly one directory instead. `computer-use --launcher-help` lists the launcher's own commands, which are the only ones the launcher handles itself; everything else goes to the Python client. Only the English files in force are installed; the `*-zh.md` proofreading translations stay in the package.
+An agent family is targeted only when its root directory already exists, so nothing is created for an agent that is not installed; when no family is found, the install falls back to the Claude Code path. Codex receives the skill in its dedicated `~/.codex/skills/` directory, which remains visible when Codex runs through WSL; `~/.agents/skills/` stays available as the shared cross-agent root. Set `COMPUTER_USE_SKILL_DIR` to install into exactly one directory instead. `computer-use --launcher-help` lists the launcher's own commands, which are the only ones the launcher handles itself; everything else goes to the Python client. Only the English files in force are installed; the `*-zh.md` proofreading translations stay in the package.
 
 ## Local commands
 
