@@ -13,6 +13,7 @@
     "computer-use": "bin/computer-use.mjs"
   },
   "files": [
+    "agents/",
     "bin/",
     "core/src/",
     "!core/src/**/__pycache__",

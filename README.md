@@ -107,6 +107,8 @@ computer-use skill uninstall
 
 An agent family is targeted only when its root directory already exists, so nothing is created for an agent that is not installed; when no family is found, the install falls back to the Claude Code path. Codex receives the skill in its dedicated `~/.codex/skills/` directory, which remains visible when Codex runs through WSL; `~/.agents/skills/` stays available as the shared cross-agent root. Set `COMPUTER_USE_SKILL_DIR` to install into exactly one directory instead.
 
+The same command installs the `computer-use` sub-agent definition into `~/.claude/agents/` (or `COMPUTER_USE_AGENT_DIR`). A screen changes constantly, so delegating the look-act loop to that sub-agent keeps screenshots and element lists out of the caller's context; only its conclusion comes back.
+
 ## Configuration
 
 ```

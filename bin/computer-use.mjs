@@ -314,6 +314,21 @@ function skillDirs() {
   return dirs.length > 0 ? dirs : [join(home, ".claude", "skills", SKILL_NAME)];
 }
 
+//: 子 Agent 定义的落点。这张表比技能目录短，因为「Agent 定义」只有 Claude Code 有：
+//: Codex 那边对应的是 prompts，格式不同，照搬会装出一份谁也不认的文件。
+const AGENT_FAMILY_ROOTS = [[".claude", "agents"]];
+
+function agentDirs() {
+  if (process.env.COMPUTER_USE_AGENT_DIR) return [process.env.COMPUTER_USE_AGENT_DIR];
+  const home = homedir();
+  // **没有回退分支**，与技能那边不同。技能「一个家族都没探测到就退回 ~/.claude」是为兼容
+  // 历史落点；而 Agent 定义只对 Claude Code 有用 —— 机器上没有 `~/.claude` 就说明它不在
+  // 这台机器上，凭空建一个目录既没人读，也违反 DEC-087 的「不存在的家族一个目录都不许建」。
+  return AGENT_FAMILY_ROOTS.filter(([root]) => existsSync(join(home, root))).map(
+    ([root, sub]) => join(home, root, sub),
+  );
+}
+
 function installSkill() {
   const source = join(PACKAGE_ROOT, "skill", SKILL_NAME);
   if (!existsSync(join(source, "SKILL.md"))) {
@@ -333,11 +348,52 @@ function installSkill() {
   return 0;
 }
 
+/**
+ * 装子 Agent 定义。
+ *
+ * 与技能分开是因为**两者的落点规则不同**：技能有三个家族根，Agent 只有一个。
+ * 合成一次探测会让「Codex 用户拿不到 Agent」看起来像正常结果。
+ */
+function installAgents() {
+  const source = join(PACKAGE_ROOT, "agents", `${SKILL_NAME}.md`);
+  if (!existsSync(source)) {
+    process.stderr.write(`computer-use: 包内缺少子 Agent 定义（${source}）\n`);
+    return 1;
+  }
+  const dirs = agentDirs();
+  if (dirs.length === 0) {
+    // 不装就说出来。悄悄少装一个文件，表现是「主会话永远不委派给子 Agent」——
+    // 那是靠现象查不到原因的。
+    process.stdout.write("未安装子 Agent：本机没有 ~/.claude（该定义只对 Claude Code 有用）\n");
+    return 0;
+  }
+  for (const dir of dirs) {
+    mkdirSync(dir, { recursive: true });
+    const target = join(dir, `${SKILL_NAME}.md`);
+    cpSync(source, target);
+    process.stdout.write(`已安装子 Agent: ${target}\n`);
+  }
+  return 0;
+}
+
 function uninstallSkill() {
   for (const dir of skillDirs()) {
     if (existsSync(dir)) {
       rmSync(dir, { recursive: true, force: true });
       process.stdout.write(`已移除 SKILL: ${dir}\n`);
+    }
+  }
+  return 0;
+}
+
+function uninstallAgents() {
+  for (const dir of agentDirs()) {
+    // **只删自己那一个文件**：Agent 目录是调用方自己的地盘，里面还可能有别人的定义。
+    // 技能目录可以整个删（那是我们独占的 `skills/computer-use`），这个不行。
+    const target = join(dir, `${SKILL_NAME}.md`);
+    if (existsSync(target)) {
+      rmSync(target, { force: true });
+      process.stdout.write(`已移除子 Agent: ${target}\n`);
     }
   }
   return 0;
@@ -354,8 +410,8 @@ function printHelp() {
       "",
       "环境管理:",
       "  env sync              重新同步 Python 环境（升级后自动触发）",
-      "  skill install         把 skill 装到本机各 Agent 家族的技能目录（Claude Code / Codex 专用 / 共享根）",
-      "  skill uninstall       移除已安装的 SKILL",
+      "  skill install         把 skill 与子 Agent 定义装到本机各 Agent 家族目录",
+      "  skill uninstall       移除已安装的 SKILL 与子 Agent 定义",
       "",
       "其余命令（begin / windows / screenshot / click / type / key / parse ...）",
       "由 Python 客户端实现，运行 `computer-use --help` 查看完整命令面。",
@@ -374,8 +430,8 @@ function main() {
     return 0;
   }
   if (first === "skill") {
-    if (second === "install") return installSkill();
-    if (second === "uninstall") return uninstallSkill();
+    if (second === "install") return Math.max(installSkill(), installAgents());
+    if (second === "uninstall") return Math.max(uninstallSkill(), uninstallAgents());
     process.stderr.write("用法: computer-use skill <install|uninstall>\n");
     return 2;
   }
