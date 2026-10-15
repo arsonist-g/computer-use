@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..config import Config
 from ..errors import CUError, ErrorCode
-from ..ids import artifact_name, format_hwnd
+from ..ids import artifact_name, parsed_name_for
 from . import capture as capture_mod
 from . import input as input_mod
 from . import omni, uia
@@ -21,6 +21,56 @@ from .controller import WriteSequenceController
 #: 写操作前置的自动前台开关。DEC-013 记录了「前置是否可关闭」这一未决项 ——
 #: 默认开启（安全优先），需要「就在当前前台窗口上点击」的场景可以关掉。
 BRING_TO_FOREGROUND = True
+
+#: 内联元素索引最多带多少条。这是**上限而不是目标** —— 正常界面上的可交互元素
+#: 只有几十个，这个数只用来挡住「某个界面把整屏都标成可点」时把返回撑爆。
+#: 触顶时返回 `elements_truncated`，被截掉的部分一条不少地留在 md 里。
+MAX_INLINE_ELEMENTS = 100
+
+#: 内联 `content` 的字符上限。检测器给出的描述偶尔是一整句，而内联要回答的是
+#: 「这是什么东西」，完整描述在 md 里一个字没少。
+INLINE_CONTENT_CHARS = 80
+
+
+def _inline_elements(elements: list) -> tuple[list[dict], bool]:
+    """把检测器产出的元素列表压成「可交互元素的紧凑索引」（DEC-094）。
+
+    只取 `interactivity` 为真的元素，理由见 `ParseResult.elements` 的注释：
+    模型读文字没问题，差的是把看到的东西落到精确坐标上，所以内联的是能点的那些。
+    `id` 是它在 md 表里的行号，调用方据此回查完整记录。
+    """
+    picked: list[dict] = []
+    truncated = False
+    for index, element in enumerate(elements, start=1):
+        if not isinstance(element, dict) or not element.get("interactivity"):
+            continue
+        box = element.get("bbox")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        content = _clip(str(element.get("content") or ""))
+        if not content:
+            # 没有名字的进不了索引 —— 这份索引的用处就是「按名字挑目标」。
+            # 检测器读不出名字的那些（`M0,0L9,0 4.5,` 这类，实测单张图最多 61 条）
+            # 内容已被清空，它们的框仍完整留在 md 里，位置也能在图上看到。
+            continue
+        if len(picked) >= MAX_INLINE_ELEMENTS:
+            truncated = True
+            break
+        picked.append({
+            "id": index,
+            "type": str(element.get("type") or ""),
+            "bbox": [int(value) for value in box],
+            "content": content,
+        })
+    return picked, truncated
+
+
+def _clip(text: str) -> str:
+    """折叠空白并截断 —— 描述里的换行会把一行内联拆成两行，读的人会以为多了一条。"""
+    flat = " ".join(text.split())
+    if len(flat) <= INLINE_CONTENT_CHARS:
+        return flat
+    return flat[:INLINE_CONTENT_CHARS - 1] + "…"
 
 
 class RealDesktop:
@@ -68,44 +118,64 @@ class RealDesktop:
         这也是 DEC-025 把 `--hwnd` 与 `--image` 并列的原因 —— 前者是我们的能力，
         后者是解析器真正需要的东西。
         """
-        source = Path(image_path) if image_path else None
-        window_ref = None
-        origin: tuple[int, int] | None = None
+        if image_path:
+            return self._parse_image(Path(image_path), ai=ai, out_dir=out_dir, seq=seq)
+        if hwnd is None:
+            raise CUError(ErrorCode.INVALID_PARAMS, "必须提供 hwnd 或 image 之一")
+        shot = self.capture(hwnd=hwnd, monitor=None,
+                            image_format=self.config.image_format,
+                            out_dir=out_dir, seq=seq)
+        return self.parse_captured(shot=shot, ai=ai, out_dir=out_dir, seq=seq)
+
+    def parse_captured(self, *, shot: CaptureResult, ai: bool,
+                       out_dir: Path, seq: int) -> ParseResult:
+        """解析一张**已经截好**的图（DEC-094）。
+
+        与 `parse(hwnd=…)` 的差别只有一点：不重新截图。截图后的自动解析必须解析
+        「刚刚返回给调用方的那一张」—— 重新截一次拿到的是另一帧，调用方手里的图
+        和元素清单就对不上了，而它们本来要靠同一套坐标去点。
+        """
+        return self._parse_image(Path(shot.path), ai=ai, out_dir=out_dir, seq=seq,
+                                 source_shot=shot)
+
+    def _parse_image(self, source: Path, *, ai: bool, out_dir: Path, seq: int,
+                     source_shot: CaptureResult | None = None) -> ParseResult:
+        window_ref = source_shot.window if source_shot is not None else None
+        origin = source_shot.origin if source_shot is not None else None
         uia_elements: list[dict] = []
         uia_note = ""
-        if source is None:
-            if hwnd is None:
-                raise CUError(ErrorCode.INVALID_PARAMS, "必须提供 hwnd 或 image 之一")
-            shot = self.capture(hwnd=hwnd, monitor=None,
-                                image_format=self.config.image_format,
-                                out_dir=out_dir, seq=seq)
-            source = Path(shot.path)
-            window_ref = shot.window
-            origin = shot.origin
-
+        if window_ref is not None and origin is not None:
             # UIA 文本通道（可选增强）。在 base 读、把结果交给 worker 合并 ——
             # UIA 是 Win32 调用，属于这一侧；worker 只管「图片 → 结构化数据」。
             # **拿不到不算失败**：Electron/自绘界面本来就不暴露控件树，
             # 那走原来的检测器路径即可（CONSTRAINT-005）。
-            uia_result = uia.read_window(hwnd)
+            uia_result = uia.read_window(window_ref.hwnd)
             if uia_result.usable:
                 # UIA 给的是**屏幕坐标**，检测器给的是**图像坐标**。先减掉 origin
                 # 归一化，否则合并时两个坐标系对不上，表现是「UIA 好像没生效」。
+                #
+                # **四个角都要减**：`bbox` 是角对角（`UiaElement.to_dict` 保证），
+                # 只减左上角会让右下角留在屏幕坐标里 —— 一个 32x32 的按钮于是变成
+                # 横跨半个屏幕的一条（实测 `后退` 成了 1178x363）。
                 uia_elements = [element.to_dict() for element in uia_result.elements]
                 for element in uia_elements:
                     box = element["bbox"]
                     box[0] -= origin[0]
                     box[1] -= origin[1]
+                    box[2] -= origin[0]
+                    box[3] -= origin[1]
             else:
                 uia_note = uia_result.reason
 
         suffix = "omni_ai" if ai else "omni"
-        name = artifact_name("img" if window_ref is None else "win", seq,
-                             hwnd=None if window_ref is None
-                             else format_hwnd(window_ref.hwnd),
-                             title=None if window_ref is None else window_ref.title,
-                             origin=origin,
-                             suffix=suffix, ext="md")
+        if source_shot is not None:
+            # 与来源图成对命名。从**图片文件名**推而不是把 kind/hwnd/title/origin
+            # 再拼一遍：解析的输入就是那张图，名字必须成对（见 `parsed_name_for`）。
+            name = parsed_name_for(Path(source_shot.path).name, suffix)
+        else:
+            # 外部图片（DEC-025 的 `--image` 形态）：没有我们自己定的来源图名，
+            # 因此没有坐标段可挂，走更短的模式。
+            name = artifact_name("img", seq, suffix=suffix, ext="md")
 
         result = omni.call_parse(
             image_path=str(source), out_dir=out_dir, file_name=name, ai=ai,
@@ -115,11 +185,14 @@ class RealDesktop:
                  "user_agent": self.config.vlm.user_agent},
             extra_elements=uia_elements or None,
         )
+        elements, truncated = _inline_elements(result.get("elements") or [])
         return ParseResult(
             path=str(result.get("path") or (out_dir / name)),
             element_count=int(result.get("element_count") or 0),
             model_name=result.get("model_name"),
             uia_reason=uia_note,
+            elements=elements,
+            elements_truncated=truncated,
         )
 
     # ---- 写 ----

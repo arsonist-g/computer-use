@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _bootstrap import add_src_to_path, local_pipe, utf8_console  # noqa: E402
+from _element_table import read_element_table  # noqa: E402
 
 utf8_console()
 CORE = add_src_to_path()
@@ -162,20 +163,10 @@ def main() -> int:
     # markdown 行形如 `| 1 | text | 16,60,58,84 | n | YIt |`，
     # split('|') 后首尾各有一个空串，因此：c[1]=# c[2]=type c[3]=bbox c[4]=inter c[5]=content。
     boxes: list[tuple[tuple[int, int, int, int], str]] = []
-    for line in md_path.read_text(encoding="utf-8").splitlines():
-        if not line.startswith("| ") or "---" in line:
-            continue
-        cells = [c.strip() for c in line.split("|")]
-        if len(cells) < 7 or cells[1] == "#":
-            continue
-        parts = [p for p in cells[3].split(",") if p.strip()]
-        if len(parts) != 4:
-            continue
-        try:
-            x1, y1, x2, y2 = (int(p) for p in parts)
-        except ValueError:
-            continue
-        boxes.append(((x1, y1, x2 - x1, y2 - y1), cells[5]))
+    # 列按**表头**认，不按位置（见 `_element_table`）。
+    for row in read_element_table(md_path):
+        x1, y1, x2, y2 = row["bbox"]
+        boxes.append(((x1, y1, x2 - x1, y2 - y1), row["content"]))
 
     matched = 0
     exact = 0

@@ -26,6 +26,7 @@ from typing import Any
 from .. import PROTOCOL_VERSION, __version__
 from ..config import Config, apply_set
 from ..desktop import build_desktop
+from ..desktop import omni as omni_bridge
 from ..desktop.base import Desktop, InputResult, WindowIdentity
 from ..desktop.controller import WriteSequenceController
 from ..errors import CUError, ErrorCode
@@ -385,6 +386,9 @@ class Daemon:
         ))
         payload = result.to_dict()
         payload["seq"] = seq
+        # 自动解析（DEC-094）。放在登记截图**之后**：解析产物的命名与 `source_seq`
+        # 都指向刚刚登记的这一张图。
+        payload["parse"] = self._parse_after_capture(session_id, session, result, seq, params)
         self.sessions.record_op(session_id, OpsEntry(
             entry_no=0,
             at=datetime.now().strftime("%H:%M:%S"),
@@ -396,6 +400,53 @@ class Daemon:
             target=_target_summary(result.window),
         ))
         return payload
+
+    def _parse_after_capture(self, session_id: str, session, shot, seq: int,
+                             params: dict) -> dict:
+        """截图之后的自动解析（DEC-094）。**失败不让截图失败。**
+
+        截图本身已经成功、图已经在盘上，而 OmniParser 是可选的（DEC-002）——
+        让它的缺席或失败把截图一起拖死，等于用可选项否掉核心能力（CONSTRAINT-005）。
+        所以结果一律收进一个状态对象，调用方读一次就够，不必再去读配置猜
+        「为什么这次没有元素」。
+
+        四种状态各回答一个不同的问题，别把它们压成一种：
+        `ok` 解析成功 · `off` 压根没打算解析（`--no-parse` 或配置关了）·
+        `skipped` 打算解析但起不了（omni 没装，**这是可修的**，所以带 hint）·
+        `failed` 解析跑了但失败（错误码照实透传，不塌缩）。
+        """
+        if params.get("parse") is False:
+            return {"status": "off", "reason": "no_parse"}
+        if not self.config.screenshot_parse:
+            return {"status": "off", "reason": "config"}
+        ready, why = omni_bridge.available()
+        if not ready:
+            return {"status": "skipped", "reason": "omni_not_installed",
+                    "detail": why, "hint": "computer-use setup omni"}
+        # 先记引用再解析（同 `_omni_parse`）：worker 是常驻的，等解析完再记的话，
+        # 另一个会话并发解析时引用还是 0，本会话一结束就会把它从底下停掉。
+        self._omni_acquire(session_id)
+        try:
+            parsed = self.desktop.parse_captured(
+                shot=shot, ai=False, out_dir=session.directory, seq=seq)
+        except CUError as exc:
+            # 失败不留引用 —— 一次都没解析成功的会话没有理由把模型钉在内存里。
+            self._omni_release(session_id)
+            return {"status": "failed", "error_code": exc.code.value,
+                    "message": exc.message, "hint": exc.hint}
+        except Exception as exc:  # noqa: BLE001 —— 自动路径的边界：异常也要变成状态
+            self._omni_release(session_id)
+            return {"status": "failed", "error_code": ErrorCode.INTERNAL_ERROR.value,
+                    "message": f"{type(exc).__name__}: {exc}"}
+        self.sessions.add_structured(session_id, StructuredRecord(
+            seq=seq,
+            kind="base",
+            file=Path(parsed.path).name,
+            source_seq=seq,
+            element_count=parsed.element_count,
+            model_name=parsed.model_name,
+        ))
+        return {"status": "ok", **parsed.to_dict()}
 
     # ---- input（写命令：取锁 + describe 必填）----
     #
@@ -495,8 +546,6 @@ class Daemon:
         self._omni_sessions.discard(session_id)
         self.omni_refcount = len(self._omni_sessions)
         if not self._omni_sessions:
-            from ..desktop import omni as omni_bridge
-
             omni_bridge.shutdown_worker()
 
     # ---- lock ----

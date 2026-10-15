@@ -28,6 +28,8 @@ computer-use skill uninstall
 
 只有家族的根目录已存在才装进去，不给没装的 agent 凭空造目录；一个家族都没探测到时退回 Claude Code 的路径。Codex 会收到专用 `~/.codex/skills/` 里的 skill，这个目录在 Codex 通过 WSL 运行时也能被正常映射；`~/.agents/skills/` 继续作为跨 agent 共享根。用 `COMPUTER_USE_SKILL_DIR` 可以只装到指定的那一个目录。`computer-use --launcher-help` 列出启动器自己处理的命令，那也是它唯一自己处理的那些；其余命令都交给 Python 客户端。只装英文正式版；`*-zh.md` 校对译本留在包里不装。
 
+同一条命令还会装 `computer-use` 子 Agent 定义，`uninstall` 会把它移除。它的落点是 `~/.claude/agents/`，设了 `COMPUTER_USE_AGENT_DIR` 时以那个为准。只针对 Claude Code —— 本机只有它有「Agent 定义」这个概念；卸载删的是那一个文件而不是整个目录，那个目录里可能还有你自己写的定义。
+
 ## 本机命令
 
 | 命令 | 参数 | 返回 |
@@ -38,7 +40,7 @@ computer-use skill uninstall
 | `daemon stop` | | 停止 daemon。它会按需重新起来。 |
 | `setup omni` | `--force`（重装依赖，用来修损坏的环境）、`--skip-weights`（不下权重） | 建起解析器环境并下载权重（约 1.4 GB）。只有 `parse` 需要。 |
 | `env sync` | | 启动器命令。重建 Python 环境。 |
-| `skill install` / `skill uninstall` | | 启动器命令。把本 skill（SKILL.md 与 references/）拷进本机各 agent 家族的技能目录，或移除它。 |
+| `skill install` / `skill uninstall` | | 启动器命令。把本 skill（SKILL.md 与 references/）与 `computer-use` 子 Agent 定义拷进本机各 agent 家族目录，或移除它们。 |
 
 ## 配置键
 
@@ -49,6 +51,7 @@ computer-use skill uninstall
 | `data_dir` | 空 | 空表示 `~/.computer-use`。 |
 | `storage_limit_bytes` | 1 GiB | `sessions/` 的总容量上限，在 `session end` 时执行，最旧优先。 |
 | `image_format` | `png` | 截图默认格式；`--format` 可按次覆盖。 |
+| `screenshot_parse` | `true` | 每张截图在返回的路上就解析，并把可交互元素的 `bbox` 与 `content` 一起返回。`screenshot --no-parse` 只关这一次。在这里关掉等于**所有**调用方都拿不到那份坐标，所以只有确实不要解析环境、或者觉得每张截图多等那几秒不值时才关。 |
 | `lock_wait_seconds` | 10 | 写操作在报 `lock_timeout` 之前等写锁的时长。 |
 | `overlay_arm_ms` | 1500 | 一段写序列开始前的延迟，给人把手从键盘上拿开的时间。这段时间里输入已经被封锁。 |
 | `overlay_continue_seconds` | 30 | 带 `--continue` 时，等你的下一条命令而保持覆盖层与输入封锁的时长。不带标志的写命令一结束，序列就结束。 |

@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _bootstrap import add_src_to_path, local_pipe, utf8_console  # noqa: E402
+from _element_table import read_element_table  # noqa: E402
 
 utf8_console()
 CORE = add_src_to_path()
@@ -50,20 +51,9 @@ def cu(*args: str, timeout: float = 1200.0) -> tuple[int, str, str]:
 def parse_md(md_path: Path) -> list[tuple[tuple[int, int, int, int], str, str]]:
     """读产出，返回 [(bbox, type, content)]。"""
     rows = []
-    for line in md_path.read_text(encoding="utf-8").splitlines():
-        if not line.startswith("| ") or "---" in line:
-            continue
-        cells = [c.strip() for c in line.split("|")]
-        if len(cells) < 7 or cells[1] == "#":
-            continue
-        parts = [p for p in cells[3].split(",") if p.strip()]
-        if len(parts) != 4:
-            continue
-        try:
-            x1, y1, x2, y2 = (int(p) for p in parts)
-        except ValueError:
-            continue
-        rows.append(((x1, y1, x2, y2), cells[2], cells[5]))
+    # 列按**表头**认，不按位置（见 `_element_table`）。
+    for row in read_element_table(md_path):
+        rows.append((row["bbox"], row["type"], row["content"]))
     return rows
 
 

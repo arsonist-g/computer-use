@@ -48,6 +48,7 @@ from cu.ids import (
     new_session_id,
     now_iso,
     parse_hwnd,
+    parsed_name_for,
     slug_title,
 )
 
@@ -473,3 +474,58 @@ def test_is_parsed_name_suffix_match_is_case_sensitive(name: str) -> None:
     # oracle: implicit —— 契约未规定后缀大小写；此处只钉住当前实现细节：比较大小写敏感。
     # 这是实现细节而非契约要求（Windows 文件系统大小写不敏感，_OMNI.md 与 _omni.md 会同名）。
     assert is_parsed_name(name) is False
+
+
+# ---------------------------------------------------------------------------
+# parsed_name_for —— 由来源图推出配套的结构化数据名（DEC-094）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("image", "expected"), [
+    # 有坐标（窗口 / 全屏）：后缀插在坐标段之后、序号之前
+    ("win-0x0001A2B-notepad-100x200-0004.png", "win-0x0001A2B-notepad-100x200-omni-0004.md"),
+    ("full-0x00000000-untitled-0x0-0001.png", "full-0x00000000-untitled-0x0-omni-0001.md"),
+    # 无坐标（外部图片）：同样插在序号之前
+    ("img-photo-0007.png", "img-photo-omni-0007.md"),
+])
+def test_parsed_name_for_inserts_the_suffix_before_the_sequence(image: str,
+                                                               expected: str) -> None:
+    # oracle: specified —— DEC-012 / DEC-043：后缀落在序号之前，且两侧都是连字符。
+    assert parsed_name_for(image) == expected
+
+
+def test_parsed_name_for_keeps_the_omni_ai_variant_apart() -> None:
+    # oracle: specified —— DEC-011：base 与 ai 是两种工件，同一张图解析两次不能同名。
+    image = "win-0x0001A2B-notepad-100x200-0004.png"
+
+    assert parsed_name_for(image, "omni") != parsed_name_for(image, "omni_ai")
+    assert parsed_name_for(image, "omni_ai") == "win-0x0001A2B-notepad-100x200-omni_ai-0004.md"
+
+
+def test_parsed_name_for_rejects_an_unknown_suffix() -> None:
+    with pytest.raises(ValueError):
+        parsed_name_for("win-0x0001A2B-notepad-100x200-0004.png", "bogus")
+
+
+@pytest.mark.parametrize("image", [
+    "win-0x0001A2B-notepad-100x200-0004.png",
+    "full-0x00000000-untitled-0x0-0001.png",
+    "img-photo-0007.png",
+])
+def test_parsed_name_for_output_is_recognised_as_structured_data(image: str) -> None:
+    # oracle: derived —— 配套名必须过 `is_parsed_name`，否则清理（DEC-017 阶段 1）
+    #   认不出它，结构化数据会一直留到整目录被删。
+    assert is_parsed_name(parsed_name_for(image)) is True
+
+
+def test_a_parsed_name_carries_the_same_sequence_and_coordinates_as_its_image() -> None:
+    # oracle: derived —— 成对靠的是「名字里带着同一组坐标与同一个序号」，
+    #   不靠排序相邻：后缀以字母开头，字典序排在所有数字序号之后，所以同一目录里
+    #   结构化数据 md 总是排在图片后面。人能一眼配对，清理也不依赖这个顺序
+    #   （DEC-017 阶段 1 同时收图片与结构化数据，见 `is_artifact`）。
+    image = "win-0x0001A2B-notepad-100x200-0004.png"
+    parsed = parsed_name_for(image)
+
+    assert "100x200" in parsed and "100x200" in image
+    assert parsed.endswith("-0004.md") and image.endswith("-0004.png")
+    assert parsed.startswith("win-0x0001A2B-notepad-")

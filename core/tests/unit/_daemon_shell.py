@@ -101,3 +101,16 @@ def record_window_screenshot(daemon: Daemon, session_id: str, *, hwnd: int, pid:
 
 def daemon_log_text(daemon: Daemon) -> str:
     return daemon.log.path.read_text(encoding="utf-8")
+
+
+def no_omni(monkeypatch) -> None:  # noqa: ANN001 - pytest 的 monkeypatch
+    """把「omni 装没装」钉成「没装」。
+
+    截图之后会自动解析（DEC-094），而 `omni.available()` 查的是**本机**的
+    `~/.computer-use/venv-omni`。单测因此会随开发机上装没装 omni 得到两种结果 ——
+    关心别的事情的用例（光标读数、参数透传）必须先把这条路关掉，
+    否则它们的结果取决于跑测试的那台机器。
+    """
+    from cu.desktop import omni as omni_bridge
+
+    monkeypatch.setattr(omni_bridge, "available", lambda: (False, "单测：不解析"))

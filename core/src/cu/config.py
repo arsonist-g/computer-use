@@ -14,6 +14,7 @@
 | `mouse_step_ms` / `mouse_max_points` | 10 / 30 | DEC-008（Q-015 待实测调整） |
 | `daemon_idle_exit_seconds` | 600 | DEC-035 |
 | `image_format` | png | DEC-016 |
+| `screenshot_parse` | true | DEC-094（截图后自动解析：AI 不会主动走可选路径） |
 """
 
 from __future__ import annotations
@@ -95,6 +96,16 @@ class Config:
     image_format: str = "png"                # png | webp
     mouse_step_ms: int = 10
     mouse_max_points: int = 30
+    #: 截图之后自动解析（DEC-094）。默认开。
+    #:
+    #: 为什么默认开而不是留给调用方选：`parse` 一直是个可选命令，而实测调用方
+    #: **不会主动走可选路径**，同时它们从像素里读坐标的能力又不够 —— 于是「看一眼
+    #: 再点」这个循环里最容易出错的一步（坐标从哪来）全靠估。把它变成截图的默认
+    #: 行为，调用方不必先知道有这么个命令。
+    #:
+    #: 关掉的入口有两个：`screenshot --no-parse` 关这一次，这个键关整台机器。
+    #: 解析失败**不**让截图失败（CONSTRAINT-005），状态回到返回值里，见 DEC-094。
+    screenshot_parse: bool = True
 
     danger_keys: list[str] = field(default_factory=lambda: list(DEFAULT_DANGER_KEYS))
 
@@ -156,6 +167,11 @@ class Config:
         need(self.image_format in ("png", "webp"), f"image_format 只能是 png/webp，实际 {self.image_format}")
         need(self.mouse_step_ms > 0, "mouse_step_ms 必须为正")
         need(self.mouse_max_points >= 1, "mouse_max_points 至少为 1")
+        # `isinstance(True, int)` 为真，所以这里判的是「真的是布尔」，不是「像布尔」——
+        # 配置文件里写 `"true"` 字符串必须报错，否则 `if self.screenshot_parse` 会把它
+        # 当成真值静默收下，而用户以为设置生效了。
+        need(isinstance(self.screenshot_parse, bool),
+             f"screenshot_parse 必须是布尔值，实际 {self.screenshot_parse!r}")
         need(isinstance(self.danger_keys, list) and all(isinstance(k, str) for k in self.danger_keys),
              "danger_keys 必须是字符串列表")
 
@@ -234,6 +250,7 @@ SETTABLE_KEYS: dict[str, str] = {
     "image_format": "str",
     "mouse_step_ms": "int",
     "mouse_max_points": "int",
+    "screenshot_parse": "bool",
     "vlm.base_url": "str",
     "vlm.api_key": "str",
     "vlm.model_name": "str",
@@ -244,6 +261,22 @@ SETTABLE_KEYS: dict[str, str] = {
 }
 
 
+#: `config set` 的布尔字面量。收下这几种写法，其余一律报错 ——
+#: 静默把 `maybe` 当成 False 会让用户以为自己关掉了某个行为，而它其实还开着。
+_BOOL_LITERALS: dict[str, bool] = {
+    "true": True, "1": True, "yes": True, "on": True,
+    "false": False, "0": False, "no": False, "off": False,
+}
+
+
+def _parse_bool(value: str, key: str) -> bool:
+    parsed = _BOOL_LITERALS.get(value.strip().lower())
+    if parsed is None:
+        raise CUError(ErrorCode.INVALID_PARAMS,
+                      f"{key} 应为布尔值（true/false），实际 {value!r}")
+    return parsed
+
+
 def apply_set(cfg: Config, key: str, value: str) -> Config:
     """`config set` 的落地点。返回新配置（不改原对象）。"""
     if key not in SETTABLE_KEYS:
@@ -252,7 +285,12 @@ def apply_set(cfg: Config, key: str, value: str) -> Config:
                       {"allowed": sorted(SETTABLE_KEYS)})
     kind = SETTABLE_KEYS[key]
     try:
-        parsed: Any = int(value) if kind == "int" else value
+        if kind == "int":
+            parsed: Any = int(value)
+        elif kind == "bool":
+            parsed = _parse_bool(value, key)
+        else:
+            parsed = value
     except ValueError as exc:
         raise CUError(ErrorCode.INVALID_PARAMS, f"{key} 应为整数，实际 {value!r}") from exc
 

@@ -126,6 +126,16 @@ class ParseResult:
     #: UIA 文本通道没参与的原因。**不是错误**：自绘/Electron 界面拿不到控件树
     #: 是应用的属性，那走检测器路径即可。有值时说明这次结果里没有 UIA 的精确文本。
     uia_reason: str = ""
+    #: **可交互元素**的紧凑索引（DEC-094）。完整数据仍然全量在 `path` 指向的 md 里
+    #: （DEC-015 不变），这份是给调用方直接用的那一小撮。
+    #:
+    #: 为什么只取可交互的：模型读文字没问题，差的是**把看到的东西落到精确坐标上**。
+    #: 一张 3440x1440 的界面有 200+ 个元素，全量内联是每张截图几千 token；
+    #: 而真正需要坐标的只有那几十个能点的东西。文本类元素不进这里 —— 它们的内容
+    #: 调用方从图上就读得出来，需要全量时 md 就在同一个返回里。
+    elements: list[dict[str, Any]] = field(default_factory=list)
+    #: 内联索引是否被截断（只可能是达到 `MAX_INLINE_ELEMENTS` 上限）。
+    elements_truncated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"path": self.path, "element_count": self.element_count}
@@ -135,6 +145,9 @@ class ParseResult:
             out["markdown"] = self.inline_markdown
         if self.uia_reason:
             out["uia_note"] = self.uia_reason
+        out["elements"] = [dict(element) for element in self.elements]
+        if self.elements_truncated:
+            out["elements_truncated"] = True
         return out
 
 
@@ -166,6 +179,9 @@ class Desktop(Protocol):
 
     def parse(self, *, hwnd: int | None, image_path: str | None, ai: bool,
               out_dir, seq: int) -> ParseResult: ...
+
+    def parse_captured(self, *, shot: CaptureResult, ai: bool,
+                       out_dir, seq: int) -> ParseResult: ...
 
     # 写方法都接受一个可选的 `expect`：daemon 解析出的期望身份。桌面层**不自己
     # 推断**它是谁 —— 那张 pid/class 的底稿在会话记录里，只有 daemon 有。
@@ -213,6 +229,9 @@ class UnavailableDesktop:
         raise self._fail(ErrorCode.CAPTURE_FAILED, "截图")
 
     def parse(self, **_kwargs):
+        raise self._fail(ErrorCode.OMNI_NOT_INSTALLED, "结构化解析")
+
+    def parse_captured(self, **_kwargs):
         raise self._fail(ErrorCode.OMNI_NOT_INSTALLED, "结构化解析")
 
     def click(self, *_args, **_kwargs) -> InputResult:

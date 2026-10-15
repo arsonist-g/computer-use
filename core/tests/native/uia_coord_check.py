@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _bootstrap import add_src_to_path, utf8_console  # noqa: E402
+from _element_table import read_element_table  # noqa: E402
 
 utf8_console()
 add_src_to_path()
@@ -29,19 +30,11 @@ from cu.desktop.real import RealDesktop  # noqa: E402
 
 
 def read_md(path: Path) -> tuple[list[dict], str]:
-    detector, diag = [], ""
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("- merge:"):
-            diag = line
-        if not line.startswith("| ") or "---" in line:
-            continue
-        cells = [c.strip() for c in line.split("|")]
-        if len(cells) < 7 or cells[1] == "#":
-            continue
-        parts = [int(v) for v in cells[3].split(",") if v.strip()]
-        detector.append({"type": cells[2], "bbox": parts, "interactivity": cells[4] == "y",
-                         "content": cells[5], "source": cells[6]})
-    return detector, diag
+    # 列按**表头**认，不按位置（见 `_element_table`）。`bbox` 一律 (x1,y1,x2,y2)，
+    # 两种来源同义 —— 本脚本下面的换算正是按这个语义写的。
+    diag = next((line for line in path.read_text(encoding="utf-8").splitlines()
+                 if line.startswith("- merge:")), "")
+    return read_element_table(path), diag
 
 
 def overlap(a: tuple, b: tuple) -> float:

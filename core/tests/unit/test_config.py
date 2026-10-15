@@ -46,6 +46,8 @@ CONTRACT_DEFAULTS = {
     "image_format": "png",
     "mouse_step_ms": 10,
     "mouse_max_points": 30,
+    # DEC-094：截图后自动解析，默认开。
+    "screenshot_parse": True,
 }
 
 # oracle: specified —— 领域规则：白名单，含 4 个 vlm.* 与 3 个 omni.*，不含 data_dir。
@@ -61,6 +63,7 @@ CONTRACT_SETTABLE_KEYS = {
     "image_format",
     "mouse_step_ms",
     "mouse_max_points",
+    "screenshot_parse",
     "vlm.base_url",
     "vlm.api_key",
     "vlm.model_name",
@@ -411,9 +414,10 @@ def test_load_rejects_non_object_root(tmp_path: Path) -> None:
 
 def test_settable_keys_whitelist_is_exact() -> None:
     # oracle: specified —— 领域规则：白名单（含 4 vlm.* / 3 omni.*）。
-    # 18 项是 DEC-045 / vlm.user_agent / DEC-053 的 daemon_log_level 之后的数量。
+    # 19 项是 DEC-045 / vlm.user_agent / DEC-053 的 daemon_log_level / DEC-094 的
+    # screenshot_parse 之后的数量。
     assert set(SETTABLE_KEYS) == CONTRACT_SETTABLE_KEYS
-    assert len(SETTABLE_KEYS) == 18
+    assert len(SETTABLE_KEYS) == 19
 
 
 def test_settable_keys_excludes_data_dir() -> None:
@@ -422,9 +426,10 @@ def test_settable_keys_excludes_data_dir() -> None:
     assert "schema" not in SETTABLE_KEYS
 
 
-def test_settable_keys_kinds_are_int_or_str() -> None:
-    # oracle: derived —— 每项声明 int/str，供解析用。
-    assert set(SETTABLE_KEYS.values()) == {"int", "str"}
+def test_settable_keys_kinds_are_known() -> None:
+    # oracle: derived —— 每项声明 int/str/bool，供解析用。多出一种类型必须同时
+    # 在 `apply_set` 里加一条解析分支，所以这条断言挡住的是「声明了却没人解析」。
+    assert set(SETTABLE_KEYS.values()) == {"int", "str", "bool"}
 
 
 # --------------------------------------------------------------------------- #
@@ -520,3 +525,46 @@ def test_apply_set_result_is_persistable(tmp_path: Path) -> None:
     target = tmp_path / "config.json"
     updated.save(target)
     assert Config.load(target).overlay_continue_seconds == 9
+
+
+# --------------------------------------------------------------------------- #
+# screenshot_parse：布尔项与它的字面量（DEC-094）
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(("literal", "expected"), [
+    ("true", True), ("TRUE", True), ("1", True), ("yes", True), ("on", True),
+    ("false", False), ("FALSE", False), ("0", False), ("no", False), ("off", False),
+])
+def test_apply_set_accepts_the_boolean_literals(literal: str, expected: bool) -> None:
+    # oracle: specified —— apply_set 的 `_BOOL_LITERALS`：这几种写法都收。
+    assert apply_set(Config(), "screenshot_parse", literal).screenshot_parse is expected
+
+
+@pytest.mark.parametrize("literal", ["maybe", "", "2", "真", "none"])
+def test_apply_set_rejects_a_non_boolean_literal(literal: str) -> None:
+    # oracle: specified —— 静默把 `maybe` 当成 False，会让用户以为自己关掉了某个行为，
+    #   而它其实还开着。所以白名单外一律报错，不做真值判断。
+    with pytest.raises(CUError) as ei:
+        apply_set(Config(), "screenshot_parse", literal)
+    assert ei.value.code is ErrorCode.INVALID_PARAMS
+
+
+def test_apply_set_boolean_result_is_persistable(tmp_path: Path) -> None:
+    # oracle: derived —— 关掉之后必须能从盘上读回 False，而不是被当成缺省值复位成 True。
+    updated = apply_set(Config(), "screenshot_parse", "false")
+    target = tmp_path / "config.json"
+    updated.save(target)
+
+    assert Config.load(target).screenshot_parse is False
+
+
+@pytest.mark.parametrize("bad", ["true", 1, 0, None])
+def test_validate_rejects_a_non_boolean_screenshot_parse(bad) -> None:  # noqa: ANN001
+    # oracle: specified —— `isinstance(True, int)` 为真，所以配置里写字符串 `"true"`
+    #   必须报错；收下它会让 `if self.screenshot_parse` 把非空字符串当成真值。
+    cfg = Config(screenshot_parse=bad)
+
+    with pytest.raises(CUError) as ei:
+        cfg.validate()
+    assert ei.value.code is ErrorCode.INVALID_PARAMS

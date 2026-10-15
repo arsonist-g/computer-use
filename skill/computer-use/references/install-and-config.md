@@ -28,6 +28,8 @@ computer-use skill uninstall
 
 An agent family is targeted only when its root directory already exists, so nothing is created for an agent that is not installed; when no family is found, the install falls back to the Claude Code path. Codex receives the skill in its dedicated `~/.codex/skills/` directory, which remains visible when Codex runs through WSL; `~/.agents/skills/` stays available as the shared cross-agent root. Set `COMPUTER_USE_SKILL_DIR` to install into exactly one directory instead. `computer-use --launcher-help` lists the launcher's own commands, which are the only ones the launcher handles itself; everything else goes to the Python client. Only the English files in force are installed; the `*-zh.md` proofreading translations stay in the package.
 
+The same command also installs the `computer-use` sub-agent definition, and `uninstall` removes it. Its home is `~/.claude/agents/`, or `COMPUTER_USE_AGENT_DIR` when that is set. Only Claude Code is targeted, because it is the only family here with agent definitions; uninstall deletes that one file rather than the directory, which holds definitions you may have written yourself.
+
 ## Local commands
 
 | Command | Arguments | Result |
@@ -38,7 +40,7 @@ An agent family is targeted only when its root directory already exists, so noth
 | `daemon stop` | | Stops the daemon. It restarts on demand. |
 | `setup omni` | `--force` (reinstall the dependencies, to repair a broken environment), `--skip-weights` (build the environment without the weights) | Builds the parser environment and downloads its weights (about 1.4 GB). Needed only for `parse`. |
 | `env sync` | | Launcher command. Rebuilds the Python environment. |
-| `skill install` / `skill uninstall` | | Launcher commands. Copies this skill (SKILL.md and references/) into the skill directory of every agent family present on this machine, or removes it. |
+| `skill install` / `skill uninstall` | | Launcher commands. Copies this skill (SKILL.md and references/) and the `computer-use` sub-agent definition into every agent family present on this machine, or removes them. |
 
 ## Configuration keys
 
@@ -49,6 +51,7 @@ An agent family is targeted only when its root directory already exists, so noth
 | `data_dir` | empty | Empty means `~/.computer-use`. |
 | `storage_limit_bytes` | 1 GiB | Total size cap for `sessions/`, enforced at `session end`, oldest first. |
 | `image_format` | `png` | Default screenshot format; `--format` overrides it per call. |
+| `screenshot_parse` | `true` | Parse every screenshot on the way out and return the interactive elements' `bbox` and `content` with it. `screenshot --no-parse` turns it off for one call. Turning it off here means every caller loses those coordinates, so set it only when the parser environment is unwanted or the per-screenshot delay is not worth paying. |
 | `lock_wait_seconds` | 10 | How long a write waits for the write lock before `lock_timeout`. |
 | `overlay_arm_ms` | 1500 | Delay before a write sequence starts, giving the person time to take their hands off the keyboard. Input is already blocked during it. |
 | `overlay_continue_seconds` | 30 | How long `--continue` keeps the overlay and input blocking while it waits for your next command. A write with no flag ends the sequence when it finishes. |

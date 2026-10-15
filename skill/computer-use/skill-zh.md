@@ -46,7 +46,9 @@ computer-use click 850 420 --hwnd 0x1A2B --session s-... --describe "打开字�
 computer-use session end --session s-...
 ```
 
-先看，再动，再看：对目标截图、判断你要操作的东西在图像里的坐标、加上 origin、发出一条写命令，然后重新截一次图，而不是假定它打开了什么。第一次用可以先跑 `computer-use windows`：它列出了窗口，说明桌面层工作正常。坐标换算对你是新的，就先拿一个无害的位置验证一遍，再开始长任务。
+先看，再动，再看：对目标截图、发出一条写命令，然后重新截一次图，而不是假定它打开了什么。第一次用可以先跑 `computer-use windows`：它列出了窗口，说明桌面层工作正常。坐标换算对你是新的，就先拿一个无害的位置验证一遍，再开始长任务。
+
+这份循环装好之后请交给 `computer-use` 子 Agent 跑（它随这份技能一起安装）。屏幕一变，截图与元素清单就一文不值，所以别让它们占着你自己的上下文：子 Agent 只交回结果。
 
 ## 命令怎么发
 
@@ -101,8 +103,8 @@ computer-use <命令> [必需参数] [flag]
 | 命令 | 说明 | 参数 | 注意事项 |
 |---|---|---|---|
 | `windows` | 列出顶层窗口，从前到后 | `--all` | `--all`：连不可见或无标题的窗口一起列。`--verbose` 追加 `class`、`is_topmost`、`zorder`。字段：`hwnd`、`title`、`pid`、`process`、`rect`（`x,y,w,h`）、`monitor`、`is_foreground`、`is_minimized`、`elevated`。 |
-| `screenshot` | 截取一个窗口或一个显示器 | `--hwnd \| --full` `--monitor` `--format` `--cursor` | `--monitor` 是 0 基、默认主显示器，且必须配 `--full`；`--format` 取 `png` 或 `webp`。返回图片路径、尺寸、`origin`、服务这次请求的截图 `layer`，以及光标所在的屏幕坐标；`cursor_inside` 说明这个坐标落不落在这张图里。`--cursor` 另外在图上的光标处画一个鼠标大小的红框，并回报 `cursor_marker`（`drawn` / `outside` / `unsupported`）；光标不在图里时**不画**。 |
-| `parse` | 检测一张图里的元素，把 markdown 写在图旁边 | `--hwnd \| --image` `--ai` | 那份 markdown 里是一张表，每个元素有 `type`、`bbox`、`interactivity`、`content`。返回路径与数量；检测器没装时是 `omni_not_installed`。 |
+| `screenshot` | 截取一个窗口或一个显示器 | `--hwnd \| --full` `--monitor` `--format` `--cursor` `--no-parse` | `--monitor` 是 0 基、默认主显示器，且必须配 `--full`；`--format` 取 `png` 或 `webp`。返回图片路径、尺寸、`origin`、服务这次请求的截图 `layer`，以及光标所在的屏幕坐标；`cursor_inside` 说明这个坐标落不落在这张图里。`--cursor` 另外在图上的光标处画一个鼠标大小的红框，并回报 `cursor_marker`（`drawn` / `outside` / `unsupported`）；光标不在图里时**不画**。**这张图在返回的路上就被解析了**：结果里的 `parse` 段带着每个可交互元素的 `bbox` 与 `content`，所以按名字挑目标，不要凭像素估。`--no-parse` 只跳过这一次。 |
+| `parse` | 检测一张图里的元素，把 markdown 写在图旁边 | `--hwnd \| --image` `--ai` | 那份 markdown 里是一张表，每个元素有 `type`、`bbox`、`interactivity`、`enabled`、`content`、`source`。`enabled` 是 `n` 表示控件在、但此刻是灰的；空着表示这一行来自检测器，它给不出这个信息。返回路径、数量，以及**有名字的**可交互元素的 `bbox` 与 `content`；检测器没装时是 `omni_not_installed`。 |
 
 ### 写命令
 
@@ -130,7 +132,8 @@ computer-use <命令> [必需参数] [flag]
 
 - 在计划点击之前先读 `elevated`：操作系统会拦截发给提权窗口的输入，所以应当绕开它，或者请用户来做这一步。
 - 优先用返回的图片路径而不是 `--inline`，因为一张全屏 PNG 有数兆；并且以返回的 `origin`、`width`、`height` 为准：第一层截图失败时兜底层存的是整个显示器，所以窗口截图有时会比窗口本身更大。
-- `parse` 的 `bbox` 是图像像素，所以同样适用那套 origin 换算。只在你需要元素时才读那份 markdown。
+- `parse` 的 `bbox` 是图像像素，所以同样适用那套 origin 换算。每张截图在返回的路上都解析过了：按返回的 `bbox` 与 `content` 挑目标，不要凭图片估，那份 markdown 只在你要看索引没带上的东西时才打开。`parse` 段写着 `off`、`skipped` 或 `failed` 就是这次没有坐标可用 —— 自己读图，并按它给的原因处置。
+- 画面上是灰的控件会报 `enabled: n`，并且不进索引：点它什么都不会发生，所以等它变可用，或者把它报出来。
 
 ## 屏幕坐标
 

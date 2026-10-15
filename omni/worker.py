@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -55,7 +56,9 @@ class WorkerError(Exception):
 #: 元素表头。顺序即列序，改它等于改契约。
 #: `source` 标出这条来自哪个通道 —— UIA 的精确文本与检测器的框混在一张表里，
 #: 不标来源的话读的人无从判断哪条该信（实测两者质量差一个数量级）。
-COLUMNS = ("#", "type", "bbox", "interactivity", "content", "source")
+#: `enabled` 只有 UIA 那一侧有（`IsEnabled`）：**空 = 未知**，不是「已启用」。
+#: 它与 `interactivity` 回答两个问题 —— 后者是「现在能不能点」，前者是「为什么不能」。
+COLUMNS = ("#", "type", "bbox", "interactivity", "enabled", "content", "source")
 
 
 class ContractViolation(Exception):
@@ -80,11 +83,15 @@ def _cell(text: Any) -> str:
     return out.replace("|", "\\|").replace("\n", " ").replace("\r", " ").strip()
 
 
-def _interactivity(raw: Any) -> str:
-    """可交互性是布尔，渲染成 `y` / `n` 而不是 `true` / `false`。
+def _flag(raw: Any) -> str:
+    """布尔列渲染成 `y` / `n`，**未知渲染成空**。
 
     这是 token 预算最直接的体现：一张表里出现上百次 `false`，换成 `n` 省掉一半，
     语义不受影响，因为表头已经交代了这一列的含义。
+
+    未知与假必须分开：`enabled` 空着表示「这条来自检测器，它给不出这个信息」，
+    而 `n` 表示「UIA 明确说它此刻禁用」。两者都渲染成 `n` 会让读的人以为
+    检测器也做了这个判断。
     """
     if raw is None:
         return ""
@@ -126,7 +133,8 @@ def to_markdown(payload: dict, *, source: str = "", model: str | None = None,
             str(index),
             _cell(element.get("type")),
             _bbox_text(element.get("bbox")),
-            _cell(_interactivity(element.get("interactivity"))),
+            _cell(_flag(element.get("interactivity"))),
+            _cell(_flag(element.get("enabled"))),
             _cell(element.get("content")),
             _cell(element.get("source")),
         ]) + " |")
@@ -137,6 +145,81 @@ def to_markdown(payload: dict, *, source: str = "", model: str | None = None,
 #: 判定「两个框是同一个元素」的重叠阈值。与 base 侧 `desktop/uia.py` 的取值一致 ——
 #: 两边算的是同一件事，阈值不同会让同一份数据在两侧合并出不同结果。
 _MATCH_THRESHOLD = 0.5
+
+
+# ---------------------------------------------------------------------------
+# 检测器产出的 content 里，哪些根本不是「标签」
+# ---------------------------------------------------------------------------
+
+#: SVG 路径命令字母。检测器偶尔会把图标的矢量路径当成文本来读。
+_PATH_DATA = re.compile(r"[MmLlHhVvCcSsQqTtAaZz]-?\d")
+_PATH_ONLY = re.compile(r"[MmLlHhVvCcSsQqTtAaZz0-9,.\-+ ]+\Z")
+#: 版本号。**实测被误伤过**（`v0.16.1` / `3.0` / `0.1.14` 都是真标签），所以单列一条例外。
+_VERSION = re.compile(r"[vV]?\d+(\.\d+)[A-Za-z0-9.\-]*\Z")
+#: 模型自称不知道。Florence 的显式弃权词。
+_ABSTENTIONS = frozenset({"unanswerable", "n/a", "unknown", "none"})
+
+
+def _longest_letter_run(text: str) -> int:
+    """最长的一段连续字母（任何语言的字母都算，`isalpha()` 认中文与假名）。"""
+    best = current = 0
+    for char in text:
+        current = current + 1 if char.isalpha() else 0
+        best = max(best, current)
+    return best
+
+
+def looks_like_a_label(text: str) -> bool:
+    """这段内容能不能当「标签」用 —— 判据是**它是不是一个名字**，不是「它对不对」。
+
+    实测语料（本机 `~/.computer-use/sessions` 里 9357 条检测器元素）里，三类不是名字：
+
+    | 类 | 例子 | 条数 |
+    |---|---|---|
+    | 路径形状 | `M0,0L9,0 4.5,`（801 次）· `M0,0L9,0 4.5,5z` | 847 |
+    | 模型自称不知道 | `unanswerable` | 7 |
+    | 无中文且没有两个连续字母的碎片 | `j147` `1147` `21` `W` `2A2` `6143` | 866 |
+
+    合计 1720 条（18.4%）。单张图最多 61 条，其中 50 条是路径形状。
+
+    **Florence 的句子描述一律保留**（`Microsoft Edge browser.` / `a folder.` /
+    `a battery level indicator.`）—— 它们至少是名字，而在 UIA 覆盖不到的图标上，
+    它们是唯一的信号。这条过滤器只清「不是名字」的东西，不去判断描述对不对。
+
+    **已知会误伤的一类**：单个字母或数字的真标签（加粗按钮的 `B`、列头的 `W`、
+    计数徽标 `21`）。判据取「两个连续字母」是有意的偏保守 —— `QQ` / `py` / `HE`
+    这类两个字母的标签会被留下。误伤一个 `B` 的代价很小（那个字符串本来也不足以让
+    调用方找到加粗按钮，图就在同一个返回里），而放行一个 `M0,0L9,0 4.5,` 会让它
+    出现在元素索引里冒充可点的东西。
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.strip(".").lower() in _ABSTENTIONS:
+        return False
+    if _VERSION.fullmatch(stripped):
+        return True
+    if _PATH_ONLY.fullmatch(stripped) and len(_PATH_DATA.findall(stripped)) >= 2:
+        return False
+    return _longest_letter_run(stripped) >= 2
+
+
+def blank_unreadable_content(payload: dict) -> dict:
+    """把读不出名字的那些元素的 `content` 清空。**只清内容，不删元素。**
+
+    框可能是真的控件，只是模型没读出它的名字 —— 删掉等于丢一个可点的东西，
+    而「这儿有个东西、我不知道它叫什么」是诚实的。清空之后它自然进不了
+    base 侧的可交互元素索引（那里筛的是「能不能按名字找到它」），但完整记录仍在 md 里。
+
+    在 **VLM 之后**调用：`--ai` 会把描述重写一遍，先过滤等于让它有机会把噪声又写回来。
+    """
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return payload
+    for element in elements:
+        if isinstance(element, dict) and not looks_like_a_label(str(element.get("content") or "")):
+            element["content"] = ""
+    return payload
 
 
 def _overlap_ratio(a: tuple, b: tuple) -> float:
@@ -193,13 +276,21 @@ def _merge_uia(detector: list, uia: list) -> list:
 
     uia_rects = [r for r in (rect_of(e.get("bbox")) for e in uia if isinstance(e, dict)) if r]
 
-    merged = [{
-        "type": str(e.get("type") or ""),
-        "bbox": [int(v) for v in e["bbox"]],
-        "interactivity": bool(e.get("interactivity")),
-        "content": str(e.get("content") or ""),
-        "source": "uia",
-    } for e in uia if isinstance(e, dict) and rect_of(e.get("bbox"))]
+    def uia_row(e: dict) -> dict:
+        row = {
+            "type": str(e.get("type") or ""),
+            "bbox": [int(v) for v in e["bbox"]],
+            "interactivity": bool(e.get("interactivity")),
+            "content": str(e.get("content") or ""),
+            "source": "uia",
+        }
+        # `enabled` 只在调用方真给了布尔时才带上：检测器产出没有这个信息，
+        # 而「未知」与「已启用」在表里必须分得开（空 vs `y`）。
+        if isinstance(e.get("enabled"), bool):
+            row["enabled"] = e["enabled"]
+        return row
+
+    merged = [uia_row(e) for e in uia if isinstance(e, dict) and rect_of(e.get("bbox"))]
 
     for item in detector:
         # 检测器侧的输入同样可能不是 dict（这个函数是纯函数，调用方不止一处）。
@@ -883,10 +974,13 @@ def _strip_code_fence(text: str) -> str:
 
 
 def handle_parse(params: dict) -> dict:
-    """`omni.parse`：图片 → markdown 文件。返回文件路径与元素数，**不返回内容**。
+    """`omni.parse`：图片 → markdown 文件。返回文件路径、元素数与**元素列表本身**。
 
-    不返回内容是有意的（PM §6.4）：一个内容多的界面会产生几百个元素，
-    把它们塞进调用方的上下文，比让它按需读文件贵得多。
+    元素列表一起回去，是因为调用方要用的正是其中的坐标（DEC-094）：早先只回路径
+    与计数（「不返回内容是有意的」，PM §6.4），结果是调用方要么再读一次文件、
+    要么干脆凭图估坐标 —— 而后者正是这条链要解决的问题。**筛选与截断在 base 侧做**
+    （`real._inline_elements`）：worker 的职责是「图片 → 结构化数据」，
+    「给调用方看多少」是输出契约的事，两边分开才不会各自漂移。
     """
     image_path = params.get("image")
     out_dir = params.get("out_dir")
@@ -942,12 +1036,14 @@ def handle_parse(params: dict) -> dict:
 
     target = Path(out_dir) / file_name
     target.parent.mkdir(parents=True, exist_ok=True)
+    # 读不出名字的清空内容（在 VLM 之后 —— 见 `blank_unreadable_content` 的 docstring）。
+    blank_unreadable_content(payload)
     target.write_text(
         to_markdown(payload, source=image_path, model=model_name, diag=_diag),
         encoding="utf-8"
     )
     return {"path": str(target), "element_count": len(payload.get("elements") or []),
-            "model_name": model_name}
+            "model_name": model_name, "elements": payload.get("elements") or []}
 
 
 ROUTES = {"omni.parse": handle_parse, "system.ping": lambda _p: {"ok": True}}
@@ -1039,12 +1135,30 @@ def _selftest() -> int:
         {"type": "icon", "bbox": [10, 20, 30, 40], "interactivity": True, "content": "设置"},
         {"type": "text", "bbox": [50, 60, 150, 80], "interactivity": False,
          "content": "标题|含竖线\n含换行"},
+        # 只有 UIA 那一侧给得出 `enabled`；空着 = 未知，必须与 `n` 分得开。
+        {"type": "button", "bbox": [1, 1, 2, 2], "interactivity": False,
+         "enabled": False, "content": "灰按钮"},
     ]}
     text = to_markdown(sample, source="shot.png", model="example-vlm")
-    assert "| # | type | bbox | interactivity | content |" in text, text
+    # 表头**从 COLUMNS 生成**，不写死字符串：写死的话加一列就断在这里，
+    # 而这个自检的职责是渲染，不是复述列序（列序由 test_omni_markdown_table.py 守）。
+    assert "| " + " | ".join(COLUMNS) + " |" in text, text
     assert "10,20,30,40" in text, text
     assert "\\|" in text, "竖线必须被转义，否则表格结构被破坏"
     assert "\n含换行" not in text, "换行必须被消掉"
+    assert "| n | n | 灰按钮 |" in text, "UIA 明确禁用的控件要在两列上同时反映"
+    assert "| y |  | 设置 |" in text, "检测器来源的行 enabled 必须空着（未知 ≠ 已启用）"
+
+    # ---- 内容过滤：读不出名字的清空，但元素与框都留着 ----
+    filtered = blank_unreadable_content({"elements": [
+        {"type": "icon", "bbox": [1, 2, 3, 4], "interactivity": True,
+         "content": "M0,0L9,0 4.5,"},
+        {"type": "text", "bbox": [5, 6, 7, 8], "interactivity": False, "content": "保存"},
+    ]})
+    assert filtered["elements"][0]["content"] == "", "路径形状的内容必须被清空"
+    assert filtered["elements"][0]["bbox"] == [1, 2, 3, 4], "清内容不许动框"
+    assert filtered["elements"][0]["interactivity"] is True, "清内容不许动可交互性"
+    assert filtered["elements"][1]["content"] == "保存", "真标签不许被清"
 
     # ---- 契约校验（DEC-011）----
     try:

@@ -10,6 +10,7 @@ import random
 import re
 import secrets
 from datetime import datetime
+from pathlib import PurePath
 
 #: 文件名里不允许出现的字符（Windows 保留字符集）+ 控制字符。
 #: 标题是运行时字符串，可能来自任何窗口，必须逐字符过滤而不是信任输入。
@@ -134,6 +135,31 @@ def is_parsed_name(name: str) -> bool:
         return False
     stem = name[:-3]
     return any(f"-{suffix}-" in stem for suffix in PARSED_SUFFIXES)
+
+
+def parsed_name_for(image_name: str, suffix: str = "omni") -> str:
+    """由**已经落盘的图片文件名**推出配套结构化数据的文件名。
+
+    为什么从图片名推、而不是照 `artifact_name` 的参数再拼一遍：解析的输入就是那张图，
+    两者的名字必须成对（清理按名字排序时要挨在一起、复盘时一眼看出谁解析了谁）。
+    再拼一遍意味着把 `kind / hwnd / title / origin` 四个入参在调用方复刻一次 ——
+    任何一处漂移都会让配套关系悄悄断掉，而这里的规则只有一条：**后缀插在序号之前**。
+
+    `img-photo-0007.png` → `img-photo-omni-0007.md`
+    `win-0x00001A2B-untitled-100x200-0004.png` → `win-0x00001A2B-untitled-100x200-omni-0004.md`
+
+    序号是最后一个连字符分段（`artifact_name` 保证它零填充且排在末尾），所以
+    「插在最后一个分段之前」对三种落点（窗口 / 全屏 / 外部图片）都成立。
+    """
+    if suffix not in PARSED_SUFFIXES:
+        raise ValueError(f"未知的结构化数据后缀：{suffix!r}")
+    stem = PurePath(image_name).stem
+    head, sep, tail = stem.rpartition("-")
+    if not sep:
+        # 理论上到不了（`artifact_name` 总是带序号），但推断不出来时宁可退化成
+        # 「前缀式」命名，也不要拼出一个 `-omni-.md` 这种谁都不认识的名字。
+        return f"{stem}-{suffix}.md"
+    return f"{head}-{suffix}-{tail}.md"
 
 
 def artifact_name(

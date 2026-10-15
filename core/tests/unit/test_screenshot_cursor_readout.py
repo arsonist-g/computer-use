@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from _daemon_shell import FakeDesktop, shell
+from _daemon_shell import FakeDesktop, no_omni, shell
 from cu import client
 from cu.desktop import capture as capture_mod
 from cu.desktop.base import CaptureResult, WindowInfo
@@ -319,7 +319,11 @@ class _CapturingDesktop(FakeDesktop):
                              origin=(0, 0), width=10, height=10, layer="wgc")
 
 
-def test_the_daemon_hands_the_cursor_flag_to_the_desktop(tmp_path: Path) -> None:
+def test_the_daemon_hands_the_cursor_flag_to_the_desktop(tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    # 本用例只关心 `--cursor` 有没有传到桌面层；自动解析（DEC-094）是另一条路，
+    # 关掉它，免得结果取决于跑测试的机器装没装 omni。
+    no_omni(monkeypatch)
     desktop = _CapturingDesktop()
     daemon = shell(tmp_path, desktop=desktop)
     session = daemon.sessions.begin()

@@ -1,10 +1,15 @@
-"""UIA 文本通道 —— 用 Windows 辅助功能 API 拿**精确**的元素文本与角色。
+"""UIA 通道 —— 用 Windows 辅助功能 API 拿**精确**的元素文本、角色与状态。
 
 它解决的是实测出来的一个问题：检测器（YOLO + OCR + Florence）在原生控件界面上
 **描述端基本不可用**。对照实验（`tests/native/uia_compare.py`，记事本）：
 
     UIA 给出 '加粗(Ctrl+B)' / '斜体(Ctrl+I)' / '链接(Ctrl+K)' / '文本编辑器'
     检测器给出 'unanswerable'（同一个幻觉词重复 15 次）
+
+**状态也是它独有的**：一个灰掉的按钮在像素上和一个亮的按钮长得一样，检测器与多模态
+端点都只会报「这是个按钮」；而 UIA 的 `IsEnabled` 直接给出此刻能不能点。实测资源管理器
+的工具栏：画面里 `新建`/`排序`/`后退`/`前进` 是灰的、`查看` 是亮的，UIA 报的正是
+`0/0/0/0/1`，五个全对。
 
 而 UIA 的局限同样明确：**它只对原生控件界面有效**。同机 14 个窗口的实测里，元素文本
 只从浏览器、资源管理器、编辑器这类原生控件应用里拿得到；Electron 与自绘界面几乎为空，
@@ -35,12 +40,20 @@ S_OK = 0
 RPC_E_CHANGED_MODE = -2147417850
 TREE_SCOPE_DESCENDANTS = 4
 
-#: 元素上限。UIA 走一趟是跨进程 COM 调用，几百个元素在复杂界面上是秒级成本。
-#: 超过这个数就截断 —— 我们要的是「文本增强」，不是完整控件树。
+#: **返回**多少个可用元素。超过就截断 —— 我们要的是「文本与状态增强」，不是完整控件树。
 MAX_ELEMENTS = 400
 
-#: 能**直接点的**控件类型。用来填 `interactivity`：UIA 的 pattern 查询更准，
-#: 但要为每个元素多做一次跨进程调用；按类型判断在覆盖度与成本之间更划算。
+#: **翻看**树里多少个元素。与 `MAX_ELEMENTS` 是两件事，早先被合成一个数，代价是：
+#: 一个 Electron 窗口的树有 550 个元素、其中 217 个可用，而「取前 400 个」把可用元素
+#: 也一起卡在 400 个下标之内 —— 实测返回 114 个，**丢掉 103 个有名字的控件**。
+#: 两者的代价差得很远：翻看是每个元素两次跨进程属性读（实测 550 个元素约 145ms，
+#: 比只翻 400 个只多 22ms），而丢掉的是真的能用来说明「这是什么」的名字。
+#:
+#: 上限仍然要有：树极大时逐元素读属性是线性成本（实测约 0.2ms/个）。
+MAX_SCAN = 4000
+
+#: 能**直接点的**控件类型。只回答「它是不是个能操作的东西」这一半；
+#: 另一半是「此刻能不能操作」，来自 `IsEnabled` —— 两者一起由 `_is_actionable` 合并。
 _INTERACTIVE_TYPES = frozenset({
     50000,  # Button
     50002,  # CheckBox
@@ -110,6 +123,13 @@ _SLOT_ARRAY_GET = 4                    # IUIAutomationElementArray
 _SLOT_CURRENT_PROCESS_ID = 20          # IUIAutomationElement
 _SLOT_CURRENT_CONTROL_TYPE = 21
 _SLOT_CURRENT_NAME = 23
+#: `get_CurrentIsEnabled`。这个槽号是**插值出来的**，两点独立验证过：
+#: ① 扫 24~31 槽，24/25/29/30/31 返回 BSTR 指针、26/27/28 返回布尔 —— 与
+#:    `AcceleratorKey / AccessKey / HasKeyboardFocus / IsKeyboardFocusable /
+#:    IsEnabled / AutomationId / ClassName / HelpText` 的顺序逐位吻合，
+#:    且与已知锚点 23(Name) / 38(IsOffscreen) / 43(BoundingRectangle) 自洽；
+#: ② 取值与画面一致（见模块 docstring 的资源管理器实测）。
+_SLOT_CURRENT_IS_ENABLED = 28
 _SLOT_CURRENT_IS_OFFSCREEN = 38
 _SLOT_CURRENT_BOUNDING_RECT = 43
 
@@ -144,16 +164,35 @@ def _release(interface: int) -> None:
 
 @dataclass
 class UiaElement:
-    """一个 UIA 元素。`rect` 是**屏幕坐标**的 (x, y, w, h)。"""
+    """一个 UIA 元素。`rect` 是**屏幕坐标**的 `(left, top, width, height)`。
+
+    这是 UIA 自己的形状，**不对外**：`to_dict()` 才转成契约形状。
+    """
 
     name: str
     control_type: str
     rect: tuple[int, int, int, int]
+    #: 类型上可交互**且**此刻启用 —— 即「现在能不能点」。
     interactive: bool
+    #: `IsEnabled`。与 `interactive` 分开留着：一个禁用的按钮和一个纯文本标签
+    #: 在 `interactive` 上都是假，但前者是「等条件满足就能点」，后者是「别管它」。
+    enabled: bool = True
 
     def to_dict(self) -> dict:
-        return {"type": self.control_type, "bbox": list(self.rect),
-                "interactivity": self.interactive, "content": self.name,
+        """契约形态：`bbox` 一律 `[x1, y1, x2, y2]`，与检测器产出同一套语义。
+
+        **转换发生在这里，不在消费侧。** `bbox` 在整个契约里只有一个含义；
+        早先这里原样输出 `(left, top, width, height)`，而合并侧按 `(x1,y1,x2,y2)`
+        解包（要求 `width > left` 且 `height > top`），于是「左边距大于自身宽度」的元素
+        被静默丢掉 —— 实测一个资源管理器窗口 UIA 读到 162 个、只有 1 个过关，
+        而侥幸过关的那些框在 md 里又是另一套语义，读的人按框算中心会偏几百像素。
+        """
+        left, top, width, height = self.rect
+        return {"type": self.control_type,
+                "bbox": [left, top, left + width, top + height],
+                "interactivity": self.interactive,
+                "enabled": self.enabled,
+                "content": self.name,
                 "source": "uia"}
 
 
@@ -166,6 +205,40 @@ class UiaResult:
     @property
     def usable(self) -> bool:
         return bool(self.elements)
+
+
+def _is_actionable(control_id: int, enabled: bool) -> bool:
+    """这个控件**现在**能不能点。
+
+    两件事分开问、合起来答：类型决定「它是不是个能操作的东西」，`IsEnabled` 决定
+    「此刻能不能操作」。早先只看类型，于是一个灰掉的按钮照样报可交互 —— 调用方据此
+    点下去什么都不会发生（实测：资源管理器没有历史时的「后退」）。
+    """
+    return control_id in _INTERACTIVE_TYPES and enabled
+
+
+def _scan_budget(total: int) -> int:
+    """这次最多翻看树里多少个元素。
+
+    **与 `MAX_ELEMENTS` 不是一回事**：那个是「返回几个可用元素」，这个是「允许翻多少个下标」。
+    合成一个数就会出现「前 400 个下标」被当成「前 400 个可用元素」——
+    而可用元素在树里的分布是不均匀的，Electron 窗口的大块无名子树会把后面的名字全顶出去。
+    """
+    return min(total, MAX_SCAN)
+
+
+def _truncation_note(total: int, scanned: int, returned: int) -> str:
+    """截断说明；没截断返回空串。
+
+    两种截断要分开说：树里还有没翻到的（扫描上限），和可用元素已经取满（返回上限）。
+    合成一句会让「为什么少了」无从判断 —— 前者要调 `MAX_SCAN`，后者才要调 `MAX_ELEMENTS`。
+    """
+    notes = []
+    if total > scanned:
+        notes.append(f"树里还有 {total - scanned} 个没翻（扫描上限 {MAX_SCAN}）")
+    if returned >= MAX_ELEMENTS:
+        notes.append(f"可用元素已取满 {MAX_ELEMENTS} 个")
+    return "已截断：" + "；".join(notes) if notes else ""
 
 
 def _co_init() -> bool:
@@ -226,7 +299,8 @@ def read_window(hwnd: int, max_elements: int = MAX_ELEMENTS) -> UiaResult:
             return UiaResult(reason="读取元素数失败")
 
         elements: list[UiaElement] = []
-        for index in range(min(count.value, max_elements)):
+        scanned = _scan_budget(count.value)
+        for index in range(scanned):
             element_out = ctypes.c_void_p()
             if _call(array, _SLOT_ARRAY_GET, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))(
                     array, index, ctypes.byref(element_out)) != S_OK or not element_out.value:
@@ -241,21 +315,25 @@ def read_window(hwnd: int, max_elements: int = MAX_ELEMENTS) -> UiaResult:
                 if rect[2] <= 0 or rect[3] <= 0:
                     continue
                 control_id = _current_int(element, _SLOT_CURRENT_CONTROL_TYPE)
+                enabled = _current_bool(element, _SLOT_CURRENT_IS_ENABLED)
                 elements.append(UiaElement(
                     name=name,
                     control_type=CONTROL_TYPES.get(control_id, f"type{control_id}"),
                     rect=rect,
-                    interactive=control_id in _INTERACTIVE_TYPES,
+                    interactive=_is_actionable(control_id, enabled),
+                    enabled=enabled,
                 ))
             finally:
                 _release(element)
+            # 取满就停 —— 但**不**因此少翻树：翻到的下标由 `_scan_budget` 决定，
+            # 这里管的是「返回几个」。
+            if len(elements) >= max_elements:
+                break
 
         if not elements:
             return UiaResult(reason="该窗口未向 UIA 暴露带文本的元素（自绘/Electron 界面）")
-        if count.value > max_elements:
-            # 截断要说明，否则「元素比实际少」会被当成检测问题。
-            return UiaResult(elements=elements,
-                             reason=f"已截断（窗口共 {count.value} 个，取前 {max_elements} 个）")
+        return UiaResult(elements=elements,
+                         reason=_truncation_note(count.value, scanned, len(elements)))
         return UiaResult(elements=elements)
     except OSError as exc:
         return UiaResult(reason=f"UIA 读取异常：{exc}")
@@ -300,77 +378,6 @@ def _current_bool(element: int, slot: int) -> bool:
     return bool(out.value)
 
 
-# ---------------------------------------------------------------------------
-# 与检测器产出的合并
-# ---------------------------------------------------------------------------
-
-#: 判定「两个框是同一个元素」的重叠阈值。取 0.5 是经验值：
-#: 检测器的框会包含一点留白，UIA 的框是控件的精确边界，两者不完全重合但必然大幅相交。
-_MATCH_THRESHOLD = 0.5
-
-
-def overlap_ratio(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
-    """交集面积 / 较小者面积。用较小者而不是并集：小框落在大框里时，
-    用并集会把「同一元素」误判成低重叠。"""
-    ax, ay, aw, ah = a
-    bx, by, bw, bh = b
-    ix = max(0, min(ax + aw, bx + bw) - max(ax, bx))
-    iy = max(0, min(ay + ah, by + bh) - max(ay, by))
-    smaller = min(aw * ah, bw * bh) or 1
-    return (ix * iy) / smaller
-
-
-def merge(detector: list[dict], uia: list[UiaElement],
-          *, origin: tuple[int, int] = (0, 0)) -> list[dict]:
-    """把 UIA 的文本与角色并入检测器产出。
-
-    两条规则：
-
-    1. **UIA 更准，所以它覆盖**。实测 15/15 全部是 UIA 对、检测器错。
-       检测器的 bbox 保留（它对「这是个可点的东西」的定位更全），只换文本与角色。
-    2. **UIA 没对上的元素原样保留**。它有检测器漏掉的东西（菜单项、状态栏文字），
-       而那些恰恰是可点的。
-
-    `origin` 是截图原点的屏幕坐标：UIA 给的是屏幕坐标，检测器给的是图像坐标，
-    两者必须先对齐才能比框。这是本模块最容易错的一处 —— 少了这步，
-    合并会因为坐标错位而匹配不上，而表现是「UIA 好像没生效」。
-    """
-    merged = [dict(item) for item in detector]
-    used: set[int] = set()
-
-    for candidate in uia:
-        screen_box = candidate.rect
-        image_box = (screen_box[0] - origin[0], screen_box[1] - origin[1],
-                     screen_box[2], screen_box[3])
-        best_index, best_ratio = -1, 0.0
-        for index, item in enumerate(merged):
-            if index in used:
-                continue
-            box = item.get("bbox")
-            if not (isinstance(box, (list, tuple)) and len(box) == 4):
-                continue
-            width = int(box[2]) - int(box[0])
-            height = int(box[3]) - int(box[1])
-            if width <= 0 or height <= 0:
-                continue
-            ratio = overlap_ratio(image_box, (int(box[0]), int(box[1]), width, height))
-            if ratio > best_ratio:
-                best_index, best_ratio = index, ratio
-
-        if best_index >= 0 and best_ratio >= _MATCH_THRESHOLD:
-            item = merged[best_index]
-            item["content"] = candidate.name
-            item["type"] = candidate.control_type
-            item["interactivity"] = candidate.interactive
-            item["source"] = "uia"
-            used.add(best_index)
-        else:
-            # 检测器漏掉的 —— UIA 独有，补进去。
-            merged.append(candidate.to_dict())
-
-    return merged
-
-
 def available() -> tuple[bool, str]:
     """UIA 是否可用。做一次真实的小查询代价太高，这里只探运行库。"""
     try:
@@ -380,5 +387,4 @@ def available() -> tuple[bool, str]:
     return True, ""
 
 
-__all__ = ["MAX_ELEMENTS", "UiaElement", "UiaResult", "available", "merge",
-           "overlap_ratio", "read_window"]
+__all__ = ["MAX_ELEMENTS", "MAX_SCAN", "UiaElement", "UiaResult", "available", "read_window"]

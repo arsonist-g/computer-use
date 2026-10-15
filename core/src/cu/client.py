@@ -135,6 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
     shot.add_argument("--format", default=None, choices=["png", "webp"], help="图片格式")
     shot.add_argument("--cursor", action="store_true", dest="draw_cursor",
                       help="在截图里用红框框出光标位置（默认不画；光标坐标始终返回）")
+    shot.add_argument("--no-parse", action="store_true", dest="no_parse",
+                      help="这次不要解析（默认截图后自动解析出可交互元素的坐标）")
 
     parse = add("parse", "把图片解析成结构化数据（OmniParser）")
     parse_target = parse.add_mutually_exclusive_group(required=True)
@@ -238,6 +240,10 @@ def to_request(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         params.update({"session_id": session_id, "format": args.format,
                        "inline": args.inline, "describe": args.describe,
                        "cursor": bool(args.draw_cursor)})
+        # 只在**显式关掉**时才发这个参数：不发 = 由 daemon 按配置决定（DEC-094）。
+        # 客户端不读配置 —— 它一次命令一个进程、是无状态的，配置的唯一权威在 daemon。
+        if getattr(args, "no_parse", False):
+            params["parse"] = False
         return "desktop.capture", params
     if command == "parse":
         return "omni.parse", {"hwnd": args.hwnd, "image": args.image, "ai": args.ai,
@@ -355,6 +361,52 @@ def _mask_for_output(command: str, result: Any) -> Any:
     return masked
 
 
+def _element_lines(data: dict) -> list[str]:
+    """元素索引的人读形态：一行一条，`id` 是在 md 表里的行号。
+
+    坐标原样打出来，不折算成屏幕坐标 —— 换算要用截图返回的 `origin`，
+    而那个值就在上面一行里，把折算结果也印出来只会多一个可能与事实不符的数。
+    """
+    lines: list[str] = []
+    for element in data.get("elements") or []:
+        box = ",".join(str(value) for value in element.get("bbox") or [])
+        lines.append(f"  {element.get('id')}  {element.get('type')}  {box}"
+                     f"  {element.get('content')}")
+    return lines
+
+
+def _parse_lines(info: Any) -> list[str]:
+    """截图返回值里 `parse` 那一段的人读形态（DEC-094）。
+
+    状态放在最前：读的人第一个问题是「这次有没有坐标可用」，不是「文件叫什么」。
+    状态词与 `--json` 里的 `status` 逐字相同，两种输出因此可以用同一套判断。
+    """
+    if not isinstance(info, dict):
+        return []
+    status = info.get("status")
+    if status == "ok":
+        head = (f"parse: {Path(str(info.get('path'))).name}"
+                f"  elements={info.get('element_count')}"
+                f"  interactive={len(info.get('elements') or [])}")
+        if info.get("elements_truncated"):
+            head += "  elements_truncated=true"
+        if info.get("model_name"):
+            head += f"  model={info['model_name']}"
+        return [head, *_element_lines(info)]
+    if status == "off":
+        return [f"parse: off  reason={info.get('reason')}"]
+    if status == "skipped":
+        detail = info.get("detail")
+        line = f"parse: skipped  reason={info.get('reason')}"
+        if detail:
+            line += f"  detail={detail}"
+        return [line, f"  → {info.get('hint')}"] if info.get("hint") else [line]
+    if status == "failed":
+        return [f"parse: failed  error_code={info.get('error_code')}"
+                f"  message={info.get('message')}"]
+    return []
+
+
 def render_text(command: str, result: Any, verbose: bool = False) -> str:
     """人读文本（api-contract.md §1.5 的形态）。"""
     if command == "begin":
@@ -385,10 +437,11 @@ def render_text(command: str, result: Any, verbose: bool = False) -> str:
             text += f"  cursor_inside={'true' if result['cursor_inside'] else 'false'}"
         if result.get("cursor_marker"):
             text += f"  cursor_marker={result['cursor_marker']}"
-        return text
+        return "\n".join([text, *_parse_lines(result.get("parse"))])
     if command == "parse":
         tail = f"  model={result['model_name']}" if result.get("model_name") else ""
-        return f"{Path(result['path']).name}  elements={result['element_count']}{tail}"
+        head = f"{Path(result['path']).name}  elements={result['element_count']}{tail}"
+        return "\n".join([head, *_element_lines(result)])
     if command in ("click", "move", "drag", "scroll", "type", "key"):
         parts = [f"ok  {command}"]
         if "moved_ms" in result:

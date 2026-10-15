@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _bootstrap import add_src_to_path, utf8_console  # noqa: E402
+from _element_table import read_element_table  # noqa: E402
 
 utf8_console()
 add_src_to_path()
@@ -57,17 +58,10 @@ def main() -> int:
     print(f"产出 = {latest.name}")
 
     detector: list[tuple[tuple[int, int, int, int], str]] = []
-    for line in latest.read_text(encoding="utf-8").splitlines():
-        if not line.startswith("| ") or "---" in line:
-            continue
-        cells = [c.strip() for c in line.split("|")]
-        if len(cells) < 7 or cells[1] == "#":
-            continue
-        parts = [p for p in cells[3].split(",") if p.strip()]
-        if len(parts) != 4:
-            continue
-        x1, y1, x2, y2 = (int(p) for p in parts)
-        detector.append(((x1, y1, x2 - x1, y2 - y1), cells[5]))
+    # 列按**表头**认，不按位置（见 `_element_table`）。
+    for row in read_element_table(latest):
+        x1, y1, x2, y2 = row["bbox"]
+        detector.append(((x1, y1, x2 - x1, y2 - y1), row["content"]))
 
     result = uia.read_window(hwnd)
     print(f"UIA {len(result.elements)} 个元素 · 检测器 {len(detector)} 个框")

@@ -248,3 +248,55 @@ def test_non_dict_detector_entries_do_not_crash() -> None:
     # oracle: specified —— UIA 为空时的同一条要求。
     result_without_uia = worker._merge_uia(["x", 7], [])
     assert isinstance(result_without_uia, list)
+
+
+# --------------------------------------------------------------------------- #
+# enabled：只有 UIA 那一侧有，未知与假必须分得开
+# --------------------------------------------------------------------------- #
+
+
+def test_uia_enabled_is_carried_through_the_merge() -> None:
+    # oracle: specified —— worker.COLUMNS 的注释：`enabled` 只有 UIA 那一侧有。
+    #   合并时把它丢掉，等于把「为什么不能点」这条信息在最后一步扔了。
+    result = worker._merge_uia([], [_uia(enabled=False)])
+
+    assert result[0]["enabled"] is False
+
+
+def test_detector_rows_carry_no_enabled_key() -> None:
+    # oracle: specified —— 「未知」与「已启用」在表里必须分得开（空 vs `y`）。
+    #   给检测器行补一个 `enabled: True` 会让读的人以为检测器也做了这个判断。
+    result = worker._merge_uia([_detector()], [])
+
+    assert "enabled" not in result[0]
+
+
+def test_a_non_boolean_enabled_is_dropped_rather_than_coerced() -> None:
+    # oracle: derived —— 表里只认真布尔；字符串 `"true"` 收下会渲染成 `n`（真值判断），
+    #   把一个「不知道」印成「明确禁用」。
+    result = worker._merge_uia([], [_uia(enabled="true")])
+
+    assert "enabled" not in result[0]
+
+
+# --------------------------------------------------------------------------- #
+# 框的语义：UIA 侧交进来的已经是角对角（由 uia.UiaElement.to_dict 保证）
+# --------------------------------------------------------------------------- #
+
+
+def test_an_element_further_right_than_its_own_width_is_kept() -> None:
+    """回归：这条曾经被 `rect_of` 当成非法框丢掉。
+
+    左侧栏的树项左边距 964、宽 27。旧实现里 UIA 的 bbox 是 (left, top, w, h)，
+    `rect_of` 按 (x1,y1,x2,y2) 解包后要求 `27 > 964` —— 不成立，于是整条消失。
+    实测一个资源管理器窗口 162 个元素只有 1 个过关。
+    """
+    from cu.desktop import uia as uia_mod
+
+    row = uia_mod.UiaElement(name="下载", control_type="treeitem",
+                             rect=(964, 394, 27, 32), interactive=True,
+                             enabled=True).to_dict()
+
+    result = worker._merge_uia([], [row])
+
+    assert [e["bbox"] for e in result] == [[964, 394, 991, 426]]
