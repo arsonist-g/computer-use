@@ -373,6 +373,34 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "        result.window_restored = False",
         "只读命令动了用户的窗口却不说，比它失败更让人意外；未被覆盖则漏红",
     ),
+    # ---- DEC-101：`window restore` 命令 ----
+    (
+        "window restore 不再查句柄是否存在",
+        "desktop/windows.py",
+        # 锚点必须**唯一**：`if not w.user32.IsWindow(hwnd):` 这一行在 `check_hwnd` 里
+        # 一字不差地出现过，脚本的 `replace(..., 1)` 会命中第一处（`check_hwnd`），
+        # 于是突变打到别处、测试自然全绿 —— 实测踩过。末尾带上只属于本函数的那一行。
+        '    if not w.user32.IsWindow(hwnd):\n'
+        '        raise CUError(ErrorCode.WINDOW_NOT_FOUND,\n'
+        '                      f"窗口不存在：{format_hwnd(hwnd)}", {"hwnd": format_hwnd(hwnd)})\n'
+        '    return WindowRestore(',
+        '    return WindowRestore(',
+        "未知句柄会静默报成功，调用方据此以为窗口还在；未被覆盖则漏红",
+    ),
+    (
+        "window restore 不再要求 --hwnd",
+        "daemon/core.py",
+        "        if not hwnd:\n",
+        "        if False:\n",
+        "没有目标的请求会往下走到解析里崩掉，而不是报参数错；未被覆盖则漏红",
+    ),
+    (
+        "最小化错误不再指向 window restore",
+        "errors.py",
+        '    ErrorCode.WINDOW_MINIMIZED: "目标窗口已最小化；先执行 `window restore --hwnd <句柄>` 还原它，再重发这条命令。",',
+        '    ErrorCode.WINDOW_MINIMIZED: "目标窗口已最小化；先让用户还原它，或改用其他窗口。",',
+        "提示语是 AI 的行动指令，退回去它就只能请人；未被覆盖则漏红",
+    ),
 ]
 
 
@@ -450,6 +478,15 @@ def main() -> int:
         if old not in text:
             failures.append(f"{label}：突变锚点未命中（{filename}）—— 锚点可能已随代码演进失效")
             print(f"[锚点未命中] {label} ({filename})")
+            continue
+        # 锚点必须**唯一**：下面那句 `replace(old, new, 1)` 只替换第一处，锚点出现两次时
+        # 突变会静默打到别的地方 —— 表现是「测试仍全绿」，而报告会说「该行为未被覆盖」，
+        # 把一个**锚点写错**的诊断成**测试缺失**（实测踩过：`if not w.user32.IsWindow(hwnd):`
+        # 在 `check_hwnd` 里一字不差地也有一份）。查一次比事后查半天便宜。
+        if text.count(old) > 1:
+            failures.append(f"{label}：突变锚点不唯一（{filename}，命中 {text.count(old)} 处）"
+                            "—— 只会替换第一处，突变会打到别的地方")
+            print(f"[锚点不唯一] {label} ({filename}) × {text.count(old)}")
             continue
 
         restore_failed = False

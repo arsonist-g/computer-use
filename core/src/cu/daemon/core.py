@@ -289,6 +289,7 @@ class Daemon:
             "session.end": self._session_end,
             "session.list": self._session_list,
             "desktop.windows": self._desktop_windows,
+            "desktop.windowRestore": self._desktop_window_restore,
             "desktop.capture": self._desktop_capture,
             "input.click": self._input_click,
             "input.move": self._input_move,
@@ -359,6 +360,18 @@ class Daemon:
         verbose = bool(params.get("verbose"))
         windows = self.desktop.list_windows(all_windows=bool(params.get("all")))
         return {"windows": [w.to_dict(verbose=verbose) for w in windows]}
+
+    def _desktop_window_restore(self, params: dict) -> dict:
+        """`window restore`：把最小化的窗口还原出来（DEC-101）。
+
+        不需要会话（它不产出工件），也**不取写锁** —— 写锁保护的是桌面输入
+        （CONSTRAINT-001），而这条命令只改一个窗口的可见状态，与 `screenshot` 里那次
+        自动还原是同一类动作；它注入的输入是零。
+        """
+        hwnd = params.get("hwnd")
+        if not hwnd:
+            raise CUError(ErrorCode.INVALID_PARAMS, "window restore 需要 --hwnd")
+        return self.desktop.restore_window(parse_hwnd(hwnd)).to_dict()
 
     def _desktop_capture(self, params: dict) -> dict:
         session_id = self._require_session_id(params)

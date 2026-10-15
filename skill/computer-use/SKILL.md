@@ -86,7 +86,7 @@ The groups below are the second level; this is the first.
 | Group | Commands |
 |---|---|
 | Sessions and lifecycle | `begin`, `session list`, `session info`, `session end` |
-| Reads | `windows`, `screenshot`, `parse` |
+| Reads | `windows`, `window restore`, `screenshot`, `parse` |
 | Writes | `click`, `move`, `drag`, `scroll`, `type`, `key` |
 | The write lock | `lock status`, `lock unlock` |
 
@@ -106,6 +106,7 @@ A row lists the parameters that belong to that command, and the shared ones are 
 | Command | Description | Parameters | Notes |
 |---|---|---|---|
 | `windows` | Lists top-level windows, front to back | `--all` | `--all`: include invisible and untitled windows. `--verbose` adds `class`, `is_topmost`, `zorder`. Fields: `hwnd`, `title`, `pid`, `process`, `rect` (`x,y,w,h`), `monitor`, `is_foreground`, `is_minimized`, `elevated`. |
+| `window restore` | Brings a minimized window back | `--hwnd` | Never takes focus. Idempotent: a visible window is left alone and the result says `restored: false`. `screenshot` restores a minimized target by itself, but a write reports `window_minimized` — run this first, then repeat the write. |
 | `screenshot` | Captures a window or a display | `--hwnd \| --full` `--monitor` `--format` `--cursor` `--no-parse` | `--monitor` is 0-based, defaults to the primary display, and needs `--full`; `--format` is `png` or `webp`. An owned modal popup is included in the crop. Returns the path, dimensions, `origin`, capture `layer`, and the cursor's screen position (`cursor_inside` says whether it falls in the image); `--cursor` also paints a box over it and reports `cursor_marker`, never outside the image. A minimized target is restored first — it has no surface to capture — and the result says `window_restored`. **The image is parsed on the way out**: the result carries a `parse` section holding every interactive element's `bbox` and `content`, so you aim by name instead of guessing pixels. `--no-parse` skips that for one call. |
 | `parse` | Detects elements in an image and writes markdown beside it | `--hwnd \| --image` `--ai` | The markdown holds `type`, `bbox`, `interactivity`, `enabled`, `content`, and `source`. `enabled` is `n` when the control is there but greyed out right now, blank when the row came from the detector, which cannot tell. Returns the path, a count, and the named interactive elements' `bbox` and `content`; without the detector, `omni_not_installed`. |
 

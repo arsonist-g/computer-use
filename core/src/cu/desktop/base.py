@@ -70,6 +70,23 @@ class WindowInfo:
 
 
 @dataclass
+class WindowRestore:
+    """`window restore` 的结果：这次有没有真的动过那个窗口（DEC-101）。"""
+
+    hwnd: int
+    title: str
+    #: 原来是最小化、这次把它还原了。**为假不是失败** —— 它本来就可见，什么都没做；
+    #: 调用方常把这条命令当「确保这个窗口可用」的前置步骤，那种情况下它该是幂等的。
+    restored: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        from ..ids import format_hwnd
+
+        return {"hwnd": format_hwnd(self.hwnd), "title": self.title,
+                "restored": self.restored}
+
+
+@dataclass
 class CaptureResult:
     """一次截图的结果。
 
@@ -178,6 +195,8 @@ class Desktop(Protocol):
 
     def list_windows(self, all_windows: bool = False) -> list[WindowInfo]: ...
 
+    def restore_window(self, hwnd: int) -> WindowRestore: ...
+
     def display_context(self): ...
 
     def capture(self, *, hwnd: int | None, monitor: int | None, image_format: str,
@@ -225,6 +244,9 @@ class UnavailableDesktop:
 
     def list_windows(self, all_windows: bool = False) -> list[WindowInfo]:
         raise self._fail(ErrorCode.INTERNAL_ERROR, "窗口枚举")
+
+    def restore_window(self, *_args, **_kwargs) -> WindowRestore:
+        raise self._fail(ErrorCode.INTERNAL_ERROR, "窗口还原")
 
     def display_context(self):
         from ..manifest import DisplayContext

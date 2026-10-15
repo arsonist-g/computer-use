@@ -15,7 +15,7 @@ from . import capture as capture_mod
 from . import input as input_mod
 from . import omni, uia
 from . import windows as windows_mod
-from .base import CaptureResult, InputResult, ParseResult, WindowIdentity, WindowInfo
+from .base import CaptureResult, InputResult, ParseResult, WindowIdentity, WindowInfo, WindowRestore
 from .controller import WriteSequenceController
 
 #: 写操作前置的自动前台开关。DEC-013 记录了「前置是否可关闭」这一未决项 ——
@@ -83,6 +83,11 @@ class RealDesktop:
     def list_windows(self, all_windows: bool = False) -> list[WindowInfo]:
         monitors = windows_mod.display_context().monitors
         return windows_mod.enumerate_windows(monitors, all_windows=all_windows)
+
+    def restore_window(self, hwnd: int) -> WindowRestore:
+        """`window restore`（DEC-101）。实现在 `windows.restore_window` —— 这一层只转发，
+        与 `list_windows` 一样：桌面层负责把 Win32 调用接起来，不负责决定语义。"""
+        return windows_mod.restore_window(hwnd)
 
     def display_context(self):
         return windows_mod.display_context()

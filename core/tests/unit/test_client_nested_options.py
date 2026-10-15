@@ -27,6 +27,7 @@ NESTED: list[tuple[list[str], str]] = [
     (["daemon", "status"], "daemon.status"),
     (["daemon", "stop"], "daemon.stop"),
     (["setup", "omni"], "daemon.setup_omni"),
+    (["window", "restore", "--hwnd", "0x1A2B"], "desktop.windowRestore"),
 ]
 
 

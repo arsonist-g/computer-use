@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from ..errors import CUError, ErrorCode
 from ..manifest import DisplayContext, MonitorInfo
 from . import win32 as w
-from .base import WindowInfo
+from .base import WindowInfo, WindowRestore
 
 #: 提权查询的缓存：一次 `windows` 枚举里几十个窗口往往属于十来个进程，
 #: 逐个 OpenProcess 是纯浪费。缓存键是 pid，值是一次枚举的生命周期。
@@ -449,6 +449,33 @@ def restore_minimized(hwnd: int) -> bool:
             )
         time.sleep(RESTORE_POLL_MS / 1000)
     return True
+
+
+def restore_window(hwnd: int) -> WindowRestore:
+    """`window restore` 的落地点：把最小化的窗口还原出来（**不抢前台**）。
+
+    为什么需要这条命令：写命令（`click` / `type` / `key`）遇到最小化窗口会报
+    `window_minimized` —— 那是 DEC-013 前置校验的既有语义，本轮不动 —— 而在此之前
+    **命令面里没有任何还原窗口的命令**，AI 遇到了只能请人去点。这条命令补的就是那个
+    缺口：先 `window restore --hwnd H`，再发写命令，前置校验就能过。
+
+    与截图里那次自动还原共用 `restore_minimized`，所以两者在「不抢前台」这条上一致，
+    也共用它的失败语义（还等不到就报 `window_minimized`）。
+
+    **幂等**：窗口本来就可见时什么都不做，返回 `restored=False`。调用方可以无条件地
+    把它当「确保这个窗口可用」的第一步 —— 那不是失败。
+
+    **不做提权检查**：这条命令不注入任何输入，UIPI 拦不到它。截图路径同样不查
+    （`RealDesktop.capture` 也不查），两处保持一致；真正会被 UIPI 拦下的是随后那条
+    写命令，它自己会报 `elevated_window`。
+    """
+    from ..ids import format_hwnd
+
+    if not w.user32.IsWindow(hwnd):
+        raise CUError(ErrorCode.WINDOW_NOT_FOUND,
+                      f"窗口不存在：{format_hwnd(hwnd)}", {"hwnd": format_hwnd(hwnd)})
+    return WindowRestore(hwnd=hwnd, title=w.window_text(hwnd),
+                         restored=restore_minimized(hwnd))
 
 
 def bring_to_foreground(hwnd: int) -> None:

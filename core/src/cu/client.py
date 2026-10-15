@@ -127,6 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
     windows = add("windows", "窗口列表，按 z-order 从上到下")
     windows.add_argument("--all", action="store_true", help="列出全部顶层窗口，不只可见有标题的")
 
+    # 名字与 `windows`（列表）只差一个字母，是有意的取舍：`window restore` 读起来
+    # 是「对某个窗口做一件事」，而 `windows restore` 会让人以为在批量操作列表。
+    # 代价是打错一个字母时拿到的是 argparse 的「参数不认识」而不是「命令不存在」。
+    window = add("window", "窗口状态操作")
+    window_sub = window.add_subparsers(dest="window_command", metavar="<restore>")
+    window_restore = window_sub.add_parser(
+        "restore", help="把最小化的窗口还原出来（不抢前台；已可见时什么都不做）",
+        parents=[common])
+    window_restore.add_argument("--hwnd", required=True, help="窗口句柄，如 0x1A2B")
+
     shot = add("screenshot", "截图")
     target = shot.add_mutually_exclusive_group(required=True)
     target.add_argument("--hwnd", default=None, help="窗口句柄，如 0x1A2B")
@@ -232,6 +242,10 @@ def to_request(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         raise CUError(ErrorCode.INVALID_PARAMS, "session 需要一个子命令：list / info / end")
     if command == "windows":
         return "desktop.windows", {"all": args.all, "verbose": verbose}
+    if command == "window":
+        if args.window_command == "restore":
+            return "desktop.windowRestore", {"hwnd": args.hwnd}
+        raise CUError(ErrorCode.INVALID_PARAMS, "window 需要一个子命令：restore")
     if command == "screenshot":
         if args.hwnd:
             params = {"hwnd": args.hwnd}
@@ -426,6 +440,11 @@ def render_text(command: str, result: Any, verbose: bool = False) -> str:
                 + (f"  class={row['class']}  z={row['zorder']}" if verbose and "class" in row else "")
             )
         return "\n".join(lines)
+    if command == "window":
+        # 「本来就可见」不是失败，两句都是成功行 —— 读的人第一个问题是「它现在能不能
+        # 用」，两句都回答「能」，只是说清这次到底有没有动过它。
+        state = "已还原" if result.get("restored") else "本来就可见"
+        return f'{state}  {result["hwnd"]}  "{result["title"]}"'
     if command == "screenshot":
         ox, oy = result["origin"]
         text = (f"{Path(result['path']).name}  {result['width']}x{result['height']}  "

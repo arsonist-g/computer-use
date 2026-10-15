@@ -67,7 +67,7 @@ HINTS: dict[ErrorCode, str] = {
     ErrorCode.LOCK_TIMEOUT: "桌面正被另一个会话占用；可稍后重试，或 `unlock --force` 强夺（会记入日志）。",
     ErrorCode.WINDOW_NOT_FOUND: "窗口已不存在；重新执行 `windows` 枚举。",
     ErrorCode.WINDOW_STALE: "hwnd 被系统复用给了别的进程；重新执行 `windows` 枚举。",
-    ErrorCode.WINDOW_MINIMIZED: "目标窗口已最小化；先让用户还原它，或改用其他窗口。",
+    ErrorCode.WINDOW_MINIMIZED: "目标窗口已最小化；先执行 `window restore --hwnd <句柄>` 还原它，再重发这条命令。",
     ErrorCode.ELEVATED_WINDOW: "该窗口属提权进程，UIPI 会拦截输入，本工具无法操作；请让用户手动完成这一步。",
     ErrorCode.FOREGROUND_FAILED: "无法把目标窗口提到前台；重试一次，仍失败则该窗口当前不可激活。",
     ErrorCode.CAPTURE_FAILED: "四层截图降级全部失败；确认窗口仍存在，独占全屏请改为无边框全屏。",

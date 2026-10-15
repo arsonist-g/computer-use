@@ -83,7 +83,7 @@ computer-use <命令> [必需参数] [flag]
 | 分组 | 命令 |
 |---|---|
 | 会话与生命周期 | `begin`、`session list`、`session info`、`session end` |
-| 读命令 | `windows`、`screenshot`、`parse` |
+| 读命令 | `windows`、`window restore`、`screenshot`、`parse` |
 | 写命令 | `click`、`move`、`drag`、`scroll`、`type`、`key` |
 | 写锁 | `lock status`、`lock unlock` |
 
@@ -103,6 +103,7 @@ computer-use <命令> [必需参数] [flag]
 | 命令 | 说明 | 参数 | 注意事项 |
 |---|---|---|---|
 | `windows` | 列出顶层窗口，从前到后 | `--all` | `--all`：连不可见或无标题的窗口一起列。`--verbose` 追加 `class`、`is_topmost`、`zorder`。字段：`hwnd`、`title`、`pid`、`process`、`rect`（`x,y,w,h`）、`monitor`、`is_foreground`、`is_minimized`、`elevated`。 |
+| `window restore` | 把最小化的窗口还原出来 | `--hwnd` | **不抢前台**。幂等：窗口本来就可见时什么都不做，结果里 `restored: false`。`screenshot` 遇到最小化窗口会自己还原，但写命令会报 `window_minimized` —— 先跑这条，再重发那条写命令。 |
 | `screenshot` | 截取一个窗口或一个显示器 | `--hwnd \| --full` `--monitor` `--format` `--cursor` `--no-parse` | `--monitor` 是 0 基、默认主显示器，且必须配 `--full`；`--format` 取 `png` 或 `webp`。返回图片路径、尺寸、`origin`、服务这次请求的截图 `layer`，以及光标所在的屏幕坐标；`cursor_inside` 说明这个坐标落不落在这张图里。`--cursor` 另外在图上的光标处画一个鼠标大小的红框，并回报 `cursor_marker`（`drawn` / `outside` / `unsupported`）；光标不在图里时**不画**。最小化的目标窗口会**先被还原出来**（最小化的窗口没有可截的合成面），结果里回报 `window_restored`。**这张图在返回的路上就被解析了**：结果里的 `parse` 段带着每个可交互元素的 `bbox` 与 `content`，所以按名字挑目标，不要凭像素估。`--no-parse` 只跳过这一次。 |
 | `parse` | 检测一张图里的元素，把 markdown 写在图旁边 | `--hwnd \| --image` `--ai` | 那份 markdown 里是一张表，每个元素有 `type`、`bbox`、`interactivity`、`enabled`、`content`、`source`。`enabled` 是 `n` 表示控件在、但此刻是灰的；空着表示这一行来自检测器，它给不出这个信息。返回路径、数量，以及**有名字的**可交互元素的 `bbox` 与 `content`；检测器没装时是 `omni_not_installed`。 |
 
