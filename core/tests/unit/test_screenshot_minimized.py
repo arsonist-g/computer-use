@@ -36,7 +36,8 @@ from cu.errors import CUError, ErrorCode
 # 手算的期望值：出处是 Win32 文档，与被测实现的取值无关
 # ---------------------------------------------------------------------------
 
-WIN_SW_RESTORE = 9            # ShowWindow 的还原命令
+WIN_SW_SHOWNOACTIVATE = 4     # ShowWindow：显示但不激活 —— 本模块用的就是它
+WIN_SW_RESTORE = 9            # ShowWindow：激活并显示 —— 会抢走前台，本模块**刻意不用**
 WIN_NOT_MINIMIZED = 0         # IsIconic：0 = 不在最小化（普通窗口或最大化窗口）
 WIN_MINIMIZED = 1             # IsIconic：非 0 = 已最小化
 TARGET_HWND = 0x0001A2B4
@@ -63,11 +64,13 @@ class _FakeWindow:
     """`windows.py` 里 `w` 命名空间的替身，同时是一台**最小化状态机**。
 
     `restore_delay_polls` 模拟「还原发出去之后还要过几帧才真的解除」——
-    真实系统里 `SW_RESTORE` 到 `IsIconic` 变假不是同一个瞬间，等待循环要能扛住。
+    真实系统里 `SW_SHOWNOACTIVATE` 到 `IsIconic` 变假不是同一个瞬间，等待循环要能扛住。
     `restore_works=False` 模拟还原发出去了但窗口始终不解除（挂死、或窗口在另一个
     虚拟桌面上），这条路径必须**报错而不是放行去截图**。
     """
 
+    SW_SHOWNOACTIVATE = WIN_SW_SHOWNOACTIVATE
+    #: 也声明 `SW_RESTORE`：它存在但**不该被用到**，用例靠「命令字面量是哪一个」来钉这件事。
     SW_RESTORE = WIN_SW_RESTORE
 
     def __init__(self, *, minimized: bool = True, restore_works: bool = True,
@@ -125,7 +128,7 @@ def test_a_visible_window_is_never_touched(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_a_maximized_window_is_not_touched(monkeypatch: pytest.MonkeyPatch) -> None:
     # oracle: specified —— Win32 里 IsIconic 对普通与最大化窗口同为 0。
-    # 对一个最大化窗口发 SW_RESTORE 会把它还原到**原始大小与位置**，
+    # 对一个最大化窗口发 SW_SHOWNOACTIVATE 会把它还原到**原始大小与位置**，
     # 等于每次截图都替用户改一次窗口布局（DEC-085 的边界）。
     fake = _install(monkeypatch, _FakeWindow(minimized=False))
     windows_mod.restore_minimized(TARGET_HWND)
@@ -137,11 +140,16 @@ def test_a_maximized_window_is_not_touched(monkeypatch: pytest.MonkeyPatch) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_a_minimized_window_is_restored_exactly_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    # oracle: specified —— 「只在 IsIconic 时发一次 ShowWindow(hwnd, SW_RESTORE)」
+def test_a_minimized_window_is_restored_without_taking_the_foreground(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # oracle: specified —— 实测（本机记事本，2026-10-15）：`SW_RESTORE` 还原之后
+    # `fg` 直接变成目标窗口；`SW_SHOWNOACTIVATE` 不动前台，而 WGC 在两种命令下都拿得到帧
+    # （都是 1006x553）。`screenshot` 是读命令，抢走用户的前台会让此刻的按键落进那个窗口，
+    # 所以这里必须发**不激活**的那一个。
+    assert WIN_SW_SHOWNOACTIVATE != WIN_SW_RESTORE, "两个命令不能写成同一个数，否则这条用例失去意义"
     fake = _install(monkeypatch, _FakeWindow(minimized=True))
     assert windows_mod.restore_minimized(TARGET_HWND) is True
-    assert fake.events == [("ShowWindow", TARGET_HWND, WIN_SW_RESTORE)]
+    assert fake.events == [("ShowWindow", TARGET_HWND, WIN_SW_SHOWNOACTIVATE)]
 
 
 def test_it_returns_as_soon_as_the_window_is_no_longer_minimized(

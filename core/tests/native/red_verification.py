@@ -353,6 +353,13 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         "那种情况下降级链必然全败，而 capture_failed 指不到真正的原因；未被覆盖则漏红",
     ),
     (
+        "还原改成抢前台的 SW_RESTORE",
+        "desktop/windows.py",
+        "    w.user32.ShowWindow(hwnd, w.SW_SHOWNOACTIVATE)",
+        "    w.user32.ShowWindow(hwnd, w.SW_RESTORE)",
+        "screenshot 是读命令，抢走用户的前台会让此刻的按键落进那个窗口；未被覆盖则漏红",
+    ),
+    (
         "还原之后不再重新枚举窗口信息",
         "desktop/real.py",
         "            info = _find_window(hwnd, monitors) or info\n",

@@ -412,10 +412,9 @@ def restore_minimized(hwnd: int) -> bool:
 
     这不是「换一条降级路径」能解决的：不还原就没有像素，加多少层都一样。
 
-    与 `bring_to_foreground` 里那次 `SW_RESTORE` 的关系：那一处服务写操作
-    （最小化的窗口拿不到前台与焦点），这一处服务截图。两者都**只在 `IsIconic` 时**
-    动手 —— `SW_RESTORE` 对**最大化**的窗口同样做「还原到原始大小与位置」，
-    无条件调用等于每次截图都替用户改一次窗口布局（DEC-085 的边界同样适用）。
+    **只在 `IsIconic` 时动手。** `SW_SHOWNOACTIVATE` 对**最大化**的窗口同样做「还原到
+    原始大小与位置」，无条件调用等于每次截图都替用户改一次窗口布局（DEC-085 的边界
+    同样适用）。
 
     **还原是可见的副作用**：用户桌面上那个窗口会弹出来。所以这里返回「动过没有」，
     由调用方把它报进返回值（`CaptureResult.window_restored`）—— 一个只读命令
@@ -426,7 +425,14 @@ def restore_minimized(hwnd: int) -> bool:
     """
     if not w.user32.IsIconic(hwnd):
         return False
-    w.user32.ShowWindow(hwnd, w.SW_RESTORE)
+    # **`SW_SHOWNOACTIVATE` 而不是 `SW_RESTORE`。** 后者按 Win32 文档是「激活并显示」，
+    # 实测（本机记事本）还原之后 `fg` 直接变成目标窗口 —— 而 `screenshot` 是读命令，
+    # 抢走用户的前台会让此刻的按键落进那个窗口，这比失败更坏。`SW_SHOWNOACTIVATE`
+    # 同样解除最小化、WGC 同样拿得到帧（实测两种命令都是 1006x553），只是不动前台。
+    #
+    # 注意这与 `bring_to_foreground` 里那次 `SW_RESTORE` **刻意不同**：那一处服务写操作，
+    # 而写操作本来就要把窗口提到前台（输入发给前台窗口），所以那里「激活」不是副作用。
+    w.user32.ShowWindow(hwnd, w.SW_SHOWNOACTIVATE)
     # 等条件而不是睡固定时长：还原是即时的，睡固定值等于每次都白等。
     # **但 `IsIconic` 变假不等于首帧已经到了** —— WGC 那边的首帧延迟由它自己的
     # `LAYER_TIMEOUT_SECONDS` 兜底，这里不管。
