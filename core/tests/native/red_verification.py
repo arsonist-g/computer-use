@@ -336,6 +336,36 @@ MUTATIONS: list[tuple[str, str, str, str, str]] = [
         '        content = _clip(str(element.get("content") or ""))\n        if False:\n',
         "无名条目会占满索引；未被覆盖则漏红",
     ),
+    # ---- DEC-100：截图遇到最小化窗口先还原 ----
+    (
+        "最小化判定取消（无条件发 SW_RESTORE）",
+        "desktop/windows.py",
+        "    if not w.user32.IsIconic(hwnd):\n        return False\n",
+        "",
+        "最大化的窗口会被还原成原始大小与位置，等于替用户改窗口布局"
+        "（DEC-085 的边界）；未被覆盖则漏红",
+    ),
+    (
+        "还原等不到也放行（不再报 window_minimized）",
+        "desktop/windows.py",
+        "    while w.user32.IsIconic(hwnd):",
+        "    while False:",
+        "那种情况下降级链必然全败，而 capture_failed 指不到真正的原因；未被覆盖则漏红",
+    ),
+    (
+        "还原之后不再重新枚举窗口信息",
+        "desktop/real.py",
+        "            info = _find_window(hwnd, monitors) or info\n",
+        "",
+        "DXGI 那条路会按还原前的 monitor 去显示器上裁，裁到的是它原来的位置；未被覆盖则漏红",
+    ),
+    (
+        "还原过也不上报 window_restored",
+        "desktop/real.py",
+        "        result.window_restored = restored",
+        "        result.window_restored = False",
+        "只读命令动了用户的窗口却不说，比它失败更让人意外；未被覆盖则漏红",
+    ),
 ]
 
 

@@ -10,6 +10,7 @@ hwnd 会被系统复用，所以「hwnd 存在」不足以保证「这就是那�
 from __future__ import annotations
 
 import ctypes
+import time
 from collections.abc import Iterable
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -392,6 +393,56 @@ def _give_focus(hwnd: int) -> None:
         w.user32.SetFocus(hwnd)
     finally:
         w.user32.AttachThreadInput(target, mine, False)
+
+
+#: 还原最小化窗口之后，等 `IsIconic` 变假的预算与轮询间隔。
+#: 实测还原是即时的（下一次读就变假），给预算只是不让某个卡住的窗口把截图挂死。
+RESTORE_WAIT_MS = 2000
+RESTORE_POLL_MS = 20
+
+
+def restore_minimized(hwnd: int) -> bool:
+    """把最小化的窗口还原出来；返回**是否真的动过它**。还等不到就抛 `window_minimized`。
+
+    截图为什么必须这么做：**最小化的窗口没有可截的合成面**。实测（本机「设置」窗口）
+    降级链两层全败 —— WGC 报「4.0s 内未交付可用帧」；DXGI 按窗口矩形去显示器上裁，
+    而最小化窗口的矩形在屏幕外（`GetWindowRect` 给 `-32000`），裁出来是空的，
+    保存时 `cv::imwrite` 抛 `!_img.empty()`。调用方看到的是 `capture_failed`，
+    而真正的原因（窗口没还原）在报错文本里一个字都没有。
+
+    这不是「换一条降级路径」能解决的：不还原就没有像素，加多少层都一样。
+
+    与 `bring_to_foreground` 里那次 `SW_RESTORE` 的关系：那一处服务写操作
+    （最小化的窗口拿不到前台与焦点），这一处服务截图。两者都**只在 `IsIconic` 时**
+    动手 —— `SW_RESTORE` 对**最大化**的窗口同样做「还原到原始大小与位置」，
+    无条件调用等于每次截图都替用户改一次窗口布局（DEC-085 的边界同样适用）。
+
+    **还原是可见的副作用**：用户桌面上那个窗口会弹出来。所以这里返回「动过没有」，
+    由调用方把它报进返回值（`CaptureResult.window_restored`）—— 一个只读命令
+    动了用户的窗口却不吭声，是比失败更坏的体验。
+
+    还等不到就报 `window_minimized` 而不是放行去截图：那种情况下降级链必然全败，
+    而 `capture_failed` 指不到真正的原因。
+    """
+    if not w.user32.IsIconic(hwnd):
+        return False
+    w.user32.ShowWindow(hwnd, w.SW_RESTORE)
+    # 等条件而不是睡固定时长：还原是即时的，睡固定值等于每次都白等。
+    # **但 `IsIconic` 变假不等于首帧已经到了** —— WGC 那边的首帧延迟由它自己的
+    # `LAYER_TIMEOUT_SECONDS` 兜底，这里不管。
+    deadline = time.monotonic() + RESTORE_WAIT_MS / 1000
+    while w.user32.IsIconic(hwnd):
+        if time.monotonic() >= deadline:
+            from ..ids import format_hwnd
+
+            raise CUError(
+                ErrorCode.WINDOW_MINIMIZED,
+                f"窗口已最小化，且自动还原后仍未解除：{format_hwnd(hwnd)}"
+                f"（{w.window_text(hwnd)}）",
+                {"hwnd": format_hwnd(hwnd), "waited_ms": RESTORE_WAIT_MS},
+            )
+        time.sleep(RESTORE_POLL_MS / 1000)
+    return True
 
 
 def bring_to_foreground(hwnd: int) -> None:

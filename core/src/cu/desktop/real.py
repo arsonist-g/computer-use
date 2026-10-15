@@ -95,16 +95,26 @@ class RealDesktop:
                 draw_cursor=draw_cursor)
         # 窗口信息要写进清单（`Screenshot.window` 是复盘时的现场证据，DEC-006）。
         monitors = windows_mod.display_context().monitors
-        info = next((w for w in windows_mod.enumerate_windows(monitors) if w.hwnd == hwnd), None)
+        info = _find_window(hwnd, monitors)
         if info is None:
             from ..ids import format_hwnd
 
             raise CUError(ErrorCode.WINDOW_NOT_FOUND,
                           f"窗口不存在：{format_hwnd(hwnd)}", {"hwnd": format_hwnd(hwnd)})
+        restored = False
+        if info.is_minimized:
+            # 最小化的窗口没有可截的合成面，降级链必然全败（见 `restore_minimized`）。
+            restored = windows_mod.restore_minimized(hwnd)
+            # 还原之后**重新枚举一次**：`rect` 与 `monitor` 都变了，而 DXGI 那条路
+            # 按 `monitor` 去显示器上裁 —— 拿还原前的值裁，裁到的是它原来的位置。
+            info = _find_window(hwnd, monitors) or info
         # 红框与坐标换算都留在 capture_window 里做：窗口原点是它算出来的
         # （DWM 扩展框），在外面二次换算等于把那条已经踩过的偏移再踩一遍。
-        return capture_mod.capture_window(hwnd, out_dir, seq, info, image_format,
-                                          draw_cursor=draw_cursor)
+        result = capture_mod.capture_window(hwnd, out_dir, seq, info, image_format,
+                                            draw_cursor=draw_cursor)
+        # 只读命令动了用户的窗口，必须让它出现在返回值里（见 `restore_minimized`）。
+        result.window_restored = restored
+        return result
 
     def parse(self, *, hwnd: int | None, image_path: str | None, ai: bool,
               out_dir: Path, seq: int) -> ParseResult:
@@ -257,6 +267,16 @@ class RealDesktop:
         windows_mod.check_hwnd(hwnd, expect_pid=expect_pid, expect_class=expect_class)
         if foreground and BRING_TO_FOREGROUND:
             windows_mod.bring_to_foreground(hwnd)
+
+
+def _find_window(hwnd: int, monitors) -> WindowInfo | None:
+    """这一次枚举里该 hwnd 的窗口信息（不在就 None）。
+
+    抽出来是因为 `capture` 要枚举两次：还原最小化窗口之后必须重来一次，
+    `rect` 与 `monitor` 都变了。两处用同一个函数，才不会出现「第二次忘了清缓存」
+    这种只在一半路径上错的问题。
+    """
+    return next((w for w in windows_mod.enumerate_windows(monitors) if w.hwnd == hwnd), None)
 
 
 def _expectation(expect: WindowIdentity | None) -> tuple[int | None, str | None]:

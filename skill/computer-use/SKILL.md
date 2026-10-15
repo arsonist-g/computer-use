@@ -51,7 +51,7 @@ computer-use session end --session s-...
 
 Look, act, look again: screenshot the target, send one write, then screenshot again rather than assuming what the write opened. A first sanity run is `computer-use windows`: if it lists windows, the desktop layer works.
 
-Run this loop in the `computer-use` sub-agent when it is installed (it ships with this skill). Screenshots and element lists are worthless the moment the screen changes, so keep them out of your own context: the sub-agent returns only the outcome.
+Run this loop in the `computer-use` sub-agent when it is installed (it ships with this skill). Screenshots and element lists die the moment the screen changes, so keep them out of your own context: the sub-agent returns only the outcome.
 
 ## Command usage
 
@@ -106,7 +106,7 @@ A row lists the parameters that belong to that command, and the shared ones are 
 | Command | Description | Parameters | Notes |
 |---|---|---|---|
 | `windows` | Lists top-level windows, front to back | `--all` | `--all`: include invisible and untitled windows. `--verbose` adds `class`, `is_topmost`, `zorder`. Fields: `hwnd`, `title`, `pid`, `process`, `rect` (`x,y,w,h`), `monitor`, `is_foreground`, `is_minimized`, `elevated`. |
-| `screenshot` | Captures a window or a display | `--hwnd \| --full` `--monitor` `--format` `--cursor` `--no-parse` | `--monitor` is 0-based, defaults to the primary display, and needs `--full`; `--format` is `png` or `webp`. An owned modal popup is included in the crop. Returns the image path, its dimensions, its `origin`, the capture `layer`, and the cursor's screen position (`cursor_inside` says whether it falls in the image). `--cursor` additionally paints a cursor-sized box over it and reports `cursor_marker`; a cursor outside the image is never painted. **The image is parsed on the way out**: the result carries a `parse` section holding every interactive element's `bbox` and `content`, so you aim by name instead of guessing pixels. `--no-parse` skips that for one call. |
+| `screenshot` | Captures a window or a display | `--hwnd \| --full` `--monitor` `--format` `--cursor` `--no-parse` | `--monitor` is 0-based, defaults to the primary display, and needs `--full`; `--format` is `png` or `webp`. An owned modal popup is included in the crop. Returns the path, dimensions, `origin`, capture `layer`, and the cursor's screen position (`cursor_inside` says whether it falls in the image); `--cursor` also paints a box over it and reports `cursor_marker`, never outside the image. A minimized target is restored first — it has no surface to capture — and the result says `window_restored`. **The image is parsed on the way out**: the result carries a `parse` section holding every interactive element's `bbox` and `content`, so you aim by name instead of guessing pixels. `--no-parse` skips that for one call. |
 | `parse` | Detects elements in an image and writes markdown beside it | `--hwnd \| --image` `--ai` | The markdown holds `type`, `bbox`, `interactivity`, `enabled`, `content`, and `source`. `enabled` is `n` when the control is there but greyed out right now, blank when the row came from the detector, which cannot tell. Returns the path, a count, and the named interactive elements' `bbox` and `content`; without the detector, `omni_not_installed`. |
 
 ### Writes

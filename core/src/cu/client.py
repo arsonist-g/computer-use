@@ -437,6 +437,8 @@ def render_text(command: str, result: Any, verbose: bool = False) -> str:
             text += f"  cursor_inside={'true' if result['cursor_inside'] else 'false'}"
         if result.get("cursor_marker"):
             text += f"  cursor_marker={result['cursor_marker']}"
+        if result.get("window_restored"):
+            text += "  window_restored=true"
         return "\n".join([text, *_parse_lines(result.get("parse"))])
     if command == "parse":
         tail = f"  model={result['model_name']}" if result.get("model_name") else ""

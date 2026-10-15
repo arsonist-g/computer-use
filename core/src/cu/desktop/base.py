@@ -97,6 +97,10 @@ class CaptureResult:
     #: 请求在图上画光标红框时，这一张的结果：`drawn` / `outside`（光标不在图内，
     #: 按约定不画）/ `unsupported`（这一层给不出能改写的帧缓冲）。没请求时为空串。
     cursor_marker: str = ""
+    #: 这张图是**把目标窗口从最小化里拉出来**之后截的。最小化的窗口没有可截的合成面，
+    #: 还原是截到图的唯一办法，但那是用户桌面上的可见变化 —— 一个只读命令动了窗口
+    #: 却不说，比它失败更让人意外。没动过时为假，且不进返回值。
+    window_restored: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -112,6 +116,8 @@ class CaptureResult:
             out["cursor_inside"] = self.cursor_inside
         if self.cursor_marker:
             out["cursor_marker"] = self.cursor_marker
+        if self.window_restored:
+            out["window_restored"] = True
         if self.inline_base64 is not None:
             out["base64"] = self.inline_base64
         return out
